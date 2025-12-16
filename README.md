@@ -1,6 +1,6 @@
 # Workflowy Local MCP
 
-A local MCP server that lets Claude Code, Claude Desktop, and Cursor read and write to your Workflowy account.
+A local MCP server that lets LLMs read and write to your Workflowy account.
 
 ## Features
 
