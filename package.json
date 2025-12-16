@@ -1,0 +1,35 @@
+{
+  "name": "workflowy-local-mcp",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "build:mcp": "esbuild mcp-server/server.ts --bundle --platform=node --target=node18 --outfile=dist-mcp/server.cjs --format=cjs",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "mcp-server": "node dist-mcp/server.cjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-fs": "^2.4.4",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-shell": "^2",
+    "@tauri-apps/plugin-store": "^2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "sql.js": "^1.13.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "esbuild": "^0.24.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4"
+  }
+}

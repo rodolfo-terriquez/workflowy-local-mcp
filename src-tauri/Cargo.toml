@@ -1,0 +1,23 @@
+[package]
+name = "workflowy-local-mcp"
+version = "1.0.0"
+description = "Workflowy Local MCP Server Desktop App"
+authors = ["Rodolfo Lopez"]
+edition = "2021"
+
+[lib]
+name = "workflowy_local_mcp_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-http = "2.5.4"
+reqwest = { version = "0.12.26", features = ["rustls-tls"] }
