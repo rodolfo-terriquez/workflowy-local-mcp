@@ -64,8 +64,7 @@ const defaultTools: ToolDefinition[] = [
   },
   {
     name: "get_node",
-    defaultDescription:
-      "Get a single node by its ID. Returns the node's name, note, and metadata.",
+    defaultDescription: "Get a single node by its ID. Returns the node's name, note, and metadata.",
   },
   {
     name: "export_all_nodes",
@@ -88,8 +87,7 @@ const defaultTools: ToolDefinition[] = [
   },
   {
     name: "delete_node",
-    defaultDescription:
-      "Permanently delete a node and all its children. Use with caution.",
+    defaultDescription: "Permanently delete a node and all its children. Use with caution.",
   },
   {
     name: "move_node",
@@ -113,18 +111,16 @@ function App() {
     message: string;
     type: "success" | "error";
   } | null>(null);
-  const [activeTab, setActiveTab] = useState<
-    "claude-code" | "claude-desktop" | "cursor"
-  >("claude-code");
-  const [activeSection, setActiveSection] = useState<
-    "general" | "api-key" | "tools" | "setup"
-  >("api-key");
+  const [activeTab, setActiveTab] = useState<"claude-code" | "claude-desktop" | "cursor">(
+    "claude-code",
+  );
+  const [activeSection, setActiveSection] = useState<"general" | "api-key" | "tools" | "setup">(
+    "api-key",
+  );
 
   // Tool customization state
   const [serverDescription, setServerDescription] = useState("");
-  const [toolDescriptions, setToolDescriptions] = useState<
-    Record<string, string>
-  >({});
+  const [toolDescriptions, setToolDescriptions] = useState<Record<string, string>>({});
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [serverPath, setServerPath] = useState("");
@@ -162,21 +158,8 @@ function App() {
 
   const loadServerPath = async () => {
     try {
-      const { homeDir } = await import("@tauri-apps/api/path");
-      const home = await homeDir();
-
-      // Construct the full path based on platform
-      if (home) {
-        // For macOS/Linux
-        if (home.includes("/")) {
-          const fullPath = `${home}/Library/Application Support/workflowy-mcp/server.cjs`;
-          setServerPath(fullPath);
-        } else {
-          // For Windows
-          const fullPath = `${home}\\AppData\\Roaming\\workflowy-mcp\\server.cjs`;
-          setServerPath(fullPath);
-        }
-      }
+      const path = await invoke<string>("get_server_path");
+      setServerPath(path);
     } catch (e) {
       console.error("Failed to get server path", e);
     }
@@ -194,9 +177,7 @@ function App() {
 
   const saveConfig = async (config: Record<string, unknown>) => {
     try {
-      const { writeTextFile, mkdir, exists } = await import(
-        "@tauri-apps/plugin-fs"
-      );
+      const { writeTextFile, mkdir, exists } = await import("@tauri-apps/plugin-fs");
       const dataDir = await getDataDir();
       const configPath = dataDir + "/config.json";
 
@@ -222,8 +203,7 @@ function App() {
 
       const config: Record<string, unknown> = { apiKey: apiKey.trim() };
       if (serverDescription) config.serverDescription = serverDescription;
-      if (Object.keys(toolDescriptions).length > 0)
-        config.toolDescriptions = toolDescriptions;
+      if (Object.keys(toolDescriptions).length > 0) config.toolDescriptions = toolDescriptions;
 
       await saveConfig(config);
 
@@ -256,10 +236,7 @@ function App() {
       await saveConfig(config);
       setHasUnsavedChanges(false);
       addLog("Tool customizations saved", "success");
-      showToast(
-        "Customizations saved! Restart your MCP client to apply changes.",
-        "success",
-      );
+      showToast("Customizations saved! Restart your MCP client to apply changes.", "success");
     } catch (e) {
       addLog(`Failed to save customizations: ${e}`, "error");
       showToast("Failed to save customizations", "error");
@@ -371,10 +348,7 @@ function App() {
           workflowy: {
             type: "stdio",
             command: "node",
-            args: [
-              serverPath ||
-                "~/Library/Application Support/workflowy-mcp/server.cjs",
-            ],
+            args: [serverPath || "~/Library/Application Support/workflowy-mcp/server.cjs"],
           },
         },
       },
@@ -390,8 +364,7 @@ function App() {
           workflowy: {
             command: "node",
             args: [
-              serverPath ||
-                "/Users/USERNAME/Library/Application Support/workflowy-mcp/server.cjs",
+              serverPath || "/Users/USERNAME/Library/Application Support/workflowy-mcp/server.cjs",
             ],
           },
         },
@@ -408,8 +381,7 @@ function App() {
           workflowy: {
             command: "node",
             args: [
-              serverPath ||
-                "/Users/USERNAME/Library/Application Support/workflowy-mcp/server.cjs",
+              serverPath || "/Users/USERNAME/Library/Application Support/workflowy-mcp/server.cjs",
             ],
           },
         },
@@ -522,9 +494,7 @@ function App() {
                   <div className="api-key-status">
                     <div className="api-key-info">
                       <span className="api-key-label">Current API Key:</span>
-                      <code className="api-key-masked">
-                        {maskApiKey(savedApiKey)}
-                      </code>
+                      <code className="api-key-masked">{maskApiKey(savedApiKey)}</code>
                     </div>
                     <span className="api-key-validated">Validated</span>
                   </div>
@@ -538,10 +508,7 @@ function App() {
                     >
                       Change Key
                     </button>
-                    <button
-                      className="button button-danger"
-                      onClick={clearApiKey}
-                    >
+                    <button className="button button-danger" onClick={clearApiKey}>
                       Clear Key
                     </button>
                   </div>
@@ -557,10 +524,7 @@ function App() {
                       placeholder="wf_xxxxxxxxxxxx"
                     />
                   </div>
-                  <button
-                    className="button button-primary"
-                    onClick={saveApiKey}
-                  >
+                  <button className="button button-primary" onClick={saveApiKey}>
                     Validate & Save
                   </button>
                 </>
@@ -579,8 +543,8 @@ function App() {
               <div className="input-group">
                 <label>Server Instructions</label>
                 <p className="field-hint">
-                  These instructions help the AI understand how to use the
-                  Workflowy tools effectively.
+                  These instructions help the AI understand how to use the Workflowy tools
+                  effectively.
                 </p>
                 <div className="description-with-reset">
                   <textarea
@@ -607,18 +571,13 @@ function App() {
                 <label>Tool Descriptions</label>
                 {defaultTools.map((tool) => (
                   <div key={tool.name} className="tool-item">
-                    <div
-                      className="tool-header"
-                      onClick={() => toggleToolExpanded(tool.name)}
-                    >
+                    <div className="tool-header" onClick={() => toggleToolExpanded(tool.name)}>
                       <span className="tool-expand-icon">
                         {expandedTools.has(tool.name) ? "▼" : "▶"}
                       </span>
                       <span className="tool-name">{tool.name}</span>
                       {isToolCustomized(tool.name) && (
-                        <span className="tool-customized-badge">
-                          customized
-                        </span>
+                        <span className="tool-customized-badge">customized</span>
                       )}
                     </div>
                     {expandedTools.has(tool.name) && (
@@ -626,9 +585,7 @@ function App() {
                         <div className="description-with-reset">
                           <textarea
                             value={getToolDescription(tool.name)}
-                            onChange={(e) =>
-                              updateToolDescription(tool.name, e.target.value)
-                            }
+                            onChange={(e) => updateToolDescription(tool.name, e.target.value)}
                             rows={3}
                           />
                           <button
@@ -691,28 +648,22 @@ function App() {
                 </p>
               </div>
 
-              <button
-                className="copy-button"
-                onClick={() => copyConfig(getActiveConfig())}
-              >
+              <button className="copy-button" onClick={() => copyConfig(getActiveConfig())}>
                 Copy Configuration
               </button>
               <div className="config-preview">{getActiveConfig()}</div>
 
               <div className="info-box">
                 <p>
-                  <strong>How it works:</strong> MCP clients like Claude Code
-                  spawn the server automatically when needed. No manual server
-                  management required.
+                  <strong>How it works:</strong> MCP clients like Claude Code spawn the server
+                  automatically when needed. No manual server management required.
                 </p>
               </div>
             </>
           )}
 
           {/* Toast */}
-          {toast && (
-            <div className={`toast ${toast.type}`}>{toast.message}</div>
-          )}
+          {toast && <div className={`toast ${toast.type}`}>{toast.message}</div>}
         </div>
       </div>
     </div>

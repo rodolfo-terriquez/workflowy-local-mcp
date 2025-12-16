@@ -15,12 +15,17 @@ A local MCP server that lets LLMs read and write to your Workflowy account.
    - **macOS**: `.dmg` file
    - **Windows**: `.msi` or `.exe` installer
 
-2. Open the app and enter your Workflowy API key
+2. **macOS users**: The app is unsigned, so you'll need to bypass Gatekeeper:
+   - **Option 1**: Right-click the app → select "Open" → click "Open" in the dialog
+   - **Option 2**: Run `xattr -cr /path/to/Workflowy\ Local\ MCP.app` in Terminal
+   - If you see "damaged and can't be opened", use Option 2
+
+3. Open the app and enter your Workflowy API key
    - Get one at [workflowy.com/api-reference](https://beta.workflowy.com/api-reference/)
 
-3. Go to the **Setup** tab and follow the instructions for your MCP client (Claude Code, Claude Desktop, Cursor, or any app that supports MCP)
+4. Go to the **Setup** tab and follow the instructions for your MCP client (Claude Code, Claude Desktop, Cursor, or any app that supports MCP)
 
-4. Restart your MCP client — the Workflowy tools are now available
+5. Restart your MCP client — the Workflowy tools are now available
 
 ## Available Tools
 

@@ -1,9 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 // Use the asm.js version to avoid needing WASM file at runtime
 import initSqlJs from "sql.js/dist/sql-asm.js";
 import type { Database } from "sql.js";
@@ -19,17 +16,15 @@ interface Config {
 }
 
 // Get data directory - use app data folder
+// Must match the Tauri app identifier in tauri.conf.json
 function getDataDir(): string {
-  const appName = "workflowy-mcp";
+  const appName = "com.workflowy.local-mcp";
   const home = os.homedir();
 
   if (process.platform === "darwin") {
     return path.join(home, "Library", "Application Support", appName);
   } else if (process.platform === "win32") {
-    return path.join(
-      process.env.APPDATA || path.join(home, "AppData", "Roaming"),
-      appName,
-    );
+    return path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"), appName);
   } else {
     return path.join(home, ".local", "share", appName);
   }
@@ -119,9 +114,7 @@ function getApiKey(): string {
     return config.apiKey;
   }
 
-  throw new Error(
-    "Workflowy API key not configured. Please set it in the app settings.",
-  );
+  throw new Error("Workflowy API key not configured. Please set it in the app settings.");
 }
 
 // Helper function for Workflowy API requests
@@ -154,11 +147,7 @@ async function workflowyRequest(
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(
-          { http_status: res.status, ok: res.ok, data },
-          null,
-          2,
-        ),
+        text: JSON.stringify({ http_status: res.status, ok: res.ok, data }, null, 2),
       },
     ],
   };
@@ -190,8 +179,7 @@ const defaultTools = [
       properties: {
         name: {
           type: "string",
-          description:
-            "A friendly name for the bookmark (e.g., 'special_inbox', 'work_tasks')",
+          description: "A friendly name for the bookmark (e.g., 'special_inbox', 'work_tasks')",
         },
         node_id: {
           type: "string",
@@ -228,8 +216,7 @@ const defaultTools = [
       properties: {
         parent_id: {
           type: "string",
-          description:
-            "Parent node ID: 'None' for top-level, 'inbox', 'home', or a node UUID",
+          description: "Parent node ID: 'None' for top-level, 'inbox', 'home', or a node UUID",
         },
       },
       required: ["parent_id"],
@@ -237,8 +224,7 @@ const defaultTools = [
   },
   {
     name: "get_node",
-    description:
-      "Get a single node by its ID. Returns the node's name, note, and metadata.",
+    description: "Get a single node by its ID. Returns the node's name, note, and metadata.",
     inputSchema: {
       type: "object",
       properties: {
@@ -296,8 +282,7 @@ const defaultTools = [
   },
   {
     name: "delete_node",
-    description:
-      "Permanently delete a node and all its children. Use with caution.",
+    description: "Permanently delete a node and all its children. Use with caution.",
     inputSchema: {
       type: "object",
       properties: {
@@ -315,8 +300,7 @@ const defaultTools = [
         node_id: { type: "string", description: "The node UUID to move" },
         parent_id: {
           type: "string",
-          description:
-            "New parent: 'inbox', 'home', 'None' for top-level, or a node UUID",
+          description: "New parent: 'inbox', 'home', 'None' for top-level, or a node UUID",
         },
       },
       required: ["node_id", "parent_id"],
@@ -393,8 +377,7 @@ Bookmarks let you save node IDs with friendly names. When a user mentions a name
 // Main server setup
 async function main() {
   const config = loadConfig();
-  const serverDescription =
-    config.serverDescription || defaultServerInstructions;
+  const serverDescription = config.serverDescription || defaultServerInstructions;
 
   const server = new Server(
     {
@@ -427,10 +410,7 @@ async function main() {
       case "save_bookmark": {
         // Delete existing bookmark with same name if exists
         db.run("DELETE FROM bookmarks WHERE name = ?", [args.name]);
-        db.run("INSERT INTO bookmarks (name, node_id) VALUES (?, ?)", [
-          args.name,
-          args.node_id,
-        ]);
+        db.run("INSERT INTO bookmarks (name, node_id) VALUES (?, ?)", [args.name, args.node_id]);
         saveDb();
         return {
           content: [
@@ -443,9 +423,7 @@ async function main() {
       }
 
       case "list_bookmarks": {
-        const results = db.exec(
-          "SELECT name, node_id, created_at FROM bookmarks ORDER BY name",
-        );
+        const results = db.exec("SELECT name, node_id, created_at FROM bookmarks ORDER BY name");
         const rows =
           results.length > 0
             ? results[0].values.map((row) => ({
@@ -460,19 +438,13 @@ async function main() {
       }
 
       case "delete_bookmark": {
-        const before = db.exec(
-          "SELECT COUNT(*) FROM bookmarks WHERE name = ?",
-          [args.name],
-        );
-        const count =
-          before.length > 0 ? (before[0].values[0][0] as number) : 0;
+        const before = db.exec("SELECT COUNT(*) FROM bookmarks WHERE name = ?", [args.name]);
+        const count = before.length > 0 ? (before[0].values[0][0] as number) : 0;
         db.run("DELETE FROM bookmarks WHERE name = ?", [args.name]);
         saveDb();
         if (count === 0) {
           return {
-            content: [
-              { type: "text", text: `Bookmark "${args.name}" not found` },
-            ],
+            content: [{ type: "text", text: `Bookmark "${args.name}" not found` }],
           };
         }
         return {
@@ -511,42 +483,22 @@ async function main() {
         const body: Record<string, unknown> = {};
         if (args.name !== undefined) body.name = args.name;
         if (args.note !== undefined) body.note = args.note;
-        return workflowyRequest(
-          apiKey,
-          `/api/v1/nodes/${args.node_id}`,
-          "POST",
-          body,
-        );
+        return workflowyRequest(apiKey, `/api/v1/nodes/${args.node_id}`, "POST", body);
       }
 
       case "delete_node":
-        return workflowyRequest(
-          apiKey,
-          `/api/v1/nodes/${args.node_id}`,
-          "DELETE",
-        );
+        return workflowyRequest(apiKey, `/api/v1/nodes/${args.node_id}`, "DELETE");
 
       case "move_node":
-        return workflowyRequest(
-          apiKey,
-          `/api/v1/nodes/${args.node_id}/move`,
-          "POST",
-          { parent_id: args.parent_id },
-        );
+        return workflowyRequest(apiKey, `/api/v1/nodes/${args.node_id}/move`, "POST", {
+          parent_id: args.parent_id,
+        });
 
       case "complete_node":
-        return workflowyRequest(
-          apiKey,
-          `/api/v1/nodes/${args.node_id}/complete`,
-          "POST",
-        );
+        return workflowyRequest(apiKey, `/api/v1/nodes/${args.node_id}/complete`, "POST");
 
       case "uncomplete_node":
-        return workflowyRequest(
-          apiKey,
-          `/api/v1/nodes/${args.node_id}/uncomplete`,
-          "POST",
-        );
+        return workflowyRequest(apiKey, `/api/v1/nodes/${args.node_id}/uncomplete`, "POST");
 
       default:
         throw new Error(`Unknown tool: ${name}`);
