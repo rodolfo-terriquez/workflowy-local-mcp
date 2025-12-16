@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    workflowy_mcp_lib::run()
+    workflowy_local_mcp_lib::run()
 }
