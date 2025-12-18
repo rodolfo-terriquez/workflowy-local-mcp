@@ -1,6 +1,11 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 // Use the asm.js version to avoid needing WASM file at runtime
 import initSqlJs from "sql.js/dist/sql-asm.js";
 import type { Database } from "sql.js";
@@ -374,20 +379,23 @@ Bookmarks let you save node IDs with friendly names. When a user mentions a name
 - Avoid export_all_nodes unless necessary (rate limited to 1/min)
 - Node names support basic formatting and markdown`;
 
+// Get server instructions dynamically
+function getServerInstructions(): string {
+  const config = loadConfig();
+  return config.serverDescription || defaultServerInstructions;
+}
+
 // Main server setup
 async function main() {
-  const config = loadConfig();
-  const serverDescription = config.serverDescription || defaultServerInstructions;
-
   const server = new Server(
     {
       name: "workflowy-mcp",
       version: "1.0.0",
-      description: serverDescription,
     },
     {
       capabilities: {
         tools: {},
+        prompts: {},
       },
     },
   );
@@ -396,6 +404,38 @@ async function main() {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: getTools(),
   }));
+
+  // List prompts handler - exposes server instructions as a prompt
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+    prompts: [
+      {
+        name: "server_instructions",
+        description: "Get the current server instructions and context for working with Workflowy",
+      },
+    ],
+  }));
+
+  // Get prompt handler - returns dynamic server instructions
+  server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    const { name } = request.params;
+
+    if (name === "server_instructions") {
+      return {
+        description: "Server instructions for working with Workflowy",
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: getServerInstructions(),
+            },
+          },
+        ],
+      };
+    }
+
+    throw new Error(`Unknown prompt: ${name}`);
+  });
 
   // Call tool handler
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
