@@ -1,5 +1,7 @@
-use tauri::Manager;
+use rusqlite::Connection;
+use serde::Serialize;
 use std::path::PathBuf;
+use tauri::Manager;
 
 /// Copy the MCP server from the app bundle to the user's data directory
 fn copy_mcp_server(app: &tauri::App) -> Result<PathBuf, String> {
@@ -14,15 +16,17 @@ fn copy_mcp_server(app: &tauri::App) -> Result<PathBuf, String> {
         .map_err(|e| format!("Failed to get resource dir: {}", e))?;
 
     // The server is bundled at _up_/dist-mcp/server.cjs (due to ../dist-mcp in tauri.conf.json)
-    let source = resource_path.join("_up_").join("dist-mcp").join("server.cjs");
+    let source = resource_path
+        .join("_up_")
+        .join("dist-mcp")
+        .join("server.cjs");
     let dest = app_data.join("server.cjs");
 
     // Always copy to ensure we have the latest version
     if source.exists() {
         std::fs::create_dir_all(&app_data)
             .map_err(|e| format!("Failed to create data dir: {}", e))?;
-        std::fs::copy(&source, &dest)
-            .map_err(|e| format!("Failed to copy server: {}", e))?;
+        std::fs::copy(&source, &dest).map_err(|e| format!("Failed to copy server: {}", e))?;
     }
 
     Ok(dest)
@@ -58,6 +62,66 @@ fn get_server_path(app_handle: tauri::AppHandle) -> Result<String, String> {
     Ok(server_path.to_string_lossy().to_string())
 }
 
+#[derive(Serialize)]
+struct Bookmark {
+    name: String,
+    node_id: String,
+    created_at: Option<String>,
+}
+
+#[tauri::command]
+fn get_bookmarks(app_handle: tauri::AppHandle) -> Result<Vec<Bookmark>, String> {
+    let app_data = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let db_path = app_data.join("bookmarks.db");
+
+    if !db_path.exists() {
+        return Ok(vec![]);
+    }
+
+    let conn = Connection::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
+
+    let mut stmt = conn
+        .prepare("SELECT name, node_id, created_at FROM bookmarks ORDER BY name")
+        .map_err(|e| format!("Failed to prepare query: {}", e))?;
+
+    let bookmarks = stmt
+        .query_map([], |row| {
+            Ok(Bookmark {
+                name: row.get(0)?,
+                node_id: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })
+        .map_err(|e| format!("Failed to query bookmarks: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(bookmarks)
+}
+
+#[tauri::command]
+fn delete_bookmark(app_handle: tauri::AppHandle, name: String) -> Result<(), String> {
+    let app_data = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let db_path = app_data.join("bookmarks.db");
+
+    if !db_path.exists() {
+        return Err("Database not found".to_string());
+    }
+
+    let conn = Connection::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
+
+    conn.execute("DELETE FROM bookmarks WHERE name = ?", [&name])
+        .map_err(|e| format!("Failed to delete bookmark: {}", e))?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -65,7 +129,12 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
-        .invoke_handler(tauri::generate_handler![validate_api_key, get_server_path])
+        .invoke_handler(tauri::generate_handler![
+            validate_api_key,
+            get_server_path,
+            get_bookmarks,
+            delete_bookmark
+        ])
         .setup(|app| {
             // Copy MCP server from bundle to data directory
             match copy_mcp_server(app) {

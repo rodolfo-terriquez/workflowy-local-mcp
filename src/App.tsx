@@ -14,6 +14,12 @@ interface ToolDefinition {
   defaultDescription: string;
 }
 
+interface Bookmark {
+  name: string;
+  node_id: string;
+  created_at: string | null;
+}
+
 // Default server instructions matching the MCP server
 const defaultServerInstructions = `This MCP server connects to a user's Workflowy account. Workflowy is an outliner app where notes are organized as nested bullet points (nodes).
 
@@ -114,9 +120,9 @@ function App() {
   const [activeTab, setActiveTab] = useState<"claude-code" | "claude-desktop" | "cursor">(
     "claude-code",
   );
-  const [activeSection, setActiveSection] = useState<"general" | "api-key" | "tools" | "setup">(
-    "api-key",
-  );
+  const [activeSection, setActiveSection] = useState<
+    "general" | "api-key" | "tools" | "setup" | "bookmarks"
+  >("api-key");
 
   // Tool customization state
   const [serverDescription, setServerDescription] = useState("");
@@ -124,6 +130,10 @@ function App() {
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [serverPath, setServerPath] = useState("");
+
+  // Bookmarks state
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [bookmarksLoading, setBookmarksLoading] = useState(false);
 
   useEffect(() => {
     loadConfig();
@@ -272,6 +282,47 @@ function App() {
   const resetServerDescription = () => {
     setServerDescription("");
     setHasUnsavedChanges(true);
+  };
+
+  const loadBookmarks = async () => {
+    setBookmarksLoading(true);
+    try {
+      const result = await invoke<Bookmark[]>("get_bookmarks");
+      setBookmarks(result);
+    } catch (e) {
+      console.error("Failed to load bookmarks:", e);
+      addLog(`Failed to load bookmarks: ${e}`, "error");
+    } finally {
+      setBookmarksLoading(false);
+    }
+  };
+
+  const deleteBookmark = async (name: string) => {
+    try {
+      await invoke("delete_bookmark", { name });
+      setBookmarks((prev) => prev.filter((b) => b.name !== name));
+      showToast(`Bookmark "${name}" deleted`, "success");
+      addLog(`Deleted bookmark: ${name}`, "info");
+    } catch (e) {
+      console.error("Failed to delete bookmark:", e);
+      showToast("Failed to delete bookmark", "error");
+    }
+  };
+
+  const formatDate = (dateStr: string | null): string => {
+    if (!dateStr) return "N/A";
+    try {
+      const date = new Date(dateStr);
+      return date.toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return dateStr;
+    }
   };
 
   const clearApiKey = async () => {
@@ -444,6 +495,15 @@ function App() {
             <span>Customize Tools</span>
           </div>
           <div
+            className={`nav-item ${activeSection === "bookmarks" ? "active" : ""}`}
+            onClick={() => {
+              setActiveSection("bookmarks");
+              loadBookmarks();
+            }}
+          >
+            <span>Bookmarks</span>
+          </div>
+          <div
             className={`nav-item ${activeSection === "general" ? "active" : ""}`}
             onClick={() => setActiveSection("general")}
           >
@@ -451,7 +511,7 @@ function App() {
           </div>
         </div>
         <div className="sidebar-footer">
-          <span className="version">v1.0.0</span>
+          <span className="version">v1.0.1</span>
         </div>
       </div>
 
@@ -659,6 +719,69 @@ function App() {
                   automatically when needed. No manual server management required.
                 </p>
               </div>
+            </>
+          )}
+
+          {/* Bookmarks Section */}
+          {activeSection === "bookmarks" && (
+            <>
+              <div className="header">
+                <h1>Bookmarks</h1>
+                <p>View and manage saved Workflowy node bookmarks</p>
+              </div>
+
+              <div className="bookmarks-actions">
+                <button
+                  className="button button-secondary"
+                  onClick={loadBookmarks}
+                  disabled={bookmarksLoading}
+                >
+                  {bookmarksLoading ? "Loading..." : "Refresh"}
+                </button>
+              </div>
+
+              {bookmarksLoading ? (
+                <div className="bookmarks-loading">Loading bookmarks...</div>
+              ) : bookmarks.length === 0 ? (
+                <div className="bookmarks-empty">
+                  <p>No bookmarks saved yet.</p>
+                  <p className="hint">
+                    Bookmarks are created when an LLM uses the save_bookmark tool to remember
+                    Workflowy node locations.
+                  </p>
+                </div>
+              ) : (
+                <div className="bookmarks-list">
+                  <div className="bookmarks-table">
+                    <div className="bookmarks-header">
+                      <span className="bookmark-col-name">Name</span>
+                      <span className="bookmark-col-id">Node ID</span>
+                      <span className="bookmark-col-date">Created</span>
+                      <span className="bookmark-col-actions">Actions</span>
+                    </div>
+                    {bookmarks.map((bookmark) => (
+                      <div key={bookmark.name} className="bookmark-row">
+                        <span className="bookmark-col-name" title={bookmark.name}>
+                          {bookmark.name}
+                        </span>
+                        <span className="bookmark-col-id">
+                          <code title={bookmark.node_id}>{bookmark.node_id}</code>
+                        </span>
+                        <span className="bookmark-col-date">{formatDate(bookmark.created_at)}</span>
+                        <span className="bookmark-col-actions">
+                          <button
+                            className="button button-danger button-small"
+                            onClick={() => deleteBookmark(bookmark.name)}
+                            title="Delete bookmark"
+                          >
+                            Delete
+                          </button>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </>
           )}
 
