@@ -31,7 +31,25 @@ const defaultServerInstructions = `This MCP server connects to a user's Workflow
 ## Bookmarks
 Bookmarks let you save node IDs with friendly names. When a user mentions a named location (like "my work inbox" or "project notes"), use list_bookmarks to see all saved bookmarks and pick the one that best matches what the user is referring to.
 
+## Local Search
+The server maintains a local cache of all nodes for fast searching:
+
+**Searching for nodes:**
+1. Use search_nodes to find nodes by text (searches name and note fields)
+2. Results include the full path to each node and the node ID
+3. Use the returned node_id with other tools (create_node, update_node, etc.)
+
+**Cache management:**
+- Use sync_nodes to refresh the cache (rate limited to 1 request per minute)
+- Use get_cache_status to check when cache was last updated
+- Cache updates automatically after create/update/delete/move/complete operations
+- Cache auto-syncs on server startup if stale (>24 hours)
+
 ## Common Workflows
+
+**Finding and modifying content:**
+1. search_nodes with relevant keywords
+2. Use the returned node_id with update_node, delete_node, move_node, etc.
 
 **Adding content to a bookmarked location:**
 1. list_bookmarks to see all saved locations
@@ -39,12 +57,13 @@ Bookmarks let you save node IDs with friendly names. When a user mentions a name
 3. create_node with that node_id as parent_id
 
 **Exploring the hierarchy:**
-1. list_nodes with parent_id='None' to see top-level nodes
-2. list_nodes with a specific node_id to see its children
+1. get_node_tree with node_id='None' to see top-level nodes with children
+2. get_node_tree with a specific node_id and depth to explore nested content
 
 ## Tips
-- Always use list_bookmarks when the user refers to a named location, then pick the best match
-- Avoid export_all_nodes unless necessary (rate limited to 1/min)
+- Use search_nodes first when looking for specific content
+- Use get_node_tree to explore node hierarchies from the local cache
+- Always use list_bookmarks when the user refers to a named location
 - Node names support basic formatting and markdown`;
 
 // Default tool definitions matching the MCP server
@@ -64,18 +83,9 @@ const defaultTools: ToolDefinition[] = [
     defaultDescription: "Delete a saved bookmark by name.",
   },
   {
-    name: "list_nodes",
+    name: "get_node_tree",
     defaultDescription:
-      "List child nodes under a parent. Always use the specified parent_id if you know it. Otherwise, use parent_id='None' for top-level nodes, or use 'inbox'/'home' for those two special locations.",
-  },
-  {
-    name: "get_node",
-    defaultDescription: "Get a single node by its ID. Returns the node's name, note, and metadata.",
-  },
-  {
-    name: "export_all_nodes",
-    defaultDescription:
-      "Export all nodes from the entire Workflowy account. WARNING: Rate limited to 1 request per minute. Use sparingly.",
+      "Get a node and its nested children from the local cache. Returns the node with its hierarchy up to the specified depth. Use sync_nodes first if cache is empty.",
   },
   {
     name: "get_targets",
@@ -93,21 +103,43 @@ const defaultTools: ToolDefinition[] = [
   },
   {
     name: "delete_node",
-    defaultDescription: "Permanently delete a node and all its children. Use with caution.",
+    defaultDescription:
+      "Permanently delete a node and all its children. Use with caution.",
   },
   {
     name: "move_node",
     defaultDescription: "Move a node to a different parent location.",
   },
   {
-    name: "complete_node",
-    defaultDescription: "Mark a node as completed (checked off).",
+    name: "set_completed",
+    defaultDescription: "Set a node's completed status (checked/unchecked).",
   },
   {
-    name: "uncomplete_node",
-    defaultDescription: "Mark a node as not completed (unchecked).",
+    name: "search_nodes",
+    defaultDescription:
+      "Search locally cached Workflowy nodes by text. Returns matching nodes with their full path. Use sync_nodes first if cache is empty or stale.",
+  },
+  {
+    name: "sync_nodes",
+    defaultDescription:
+      "Sync all Workflowy nodes to local cache for searching. Rate limited to once per minute. Use this before searching if cache is empty or stale.",
+  },
+  {
+    name: "get_cache_status",
+    defaultDescription:
+      "Get the status of the local node cache including last sync time, node count, and freshness.",
   },
 ];
+
+interface CacheStatus {
+  cache_populated: boolean;
+  node_count: number;
+  last_sync: string;
+  hours_since_sync: number | null;
+  is_stale: boolean;
+  can_sync_now: boolean;
+  sync_cooldown_seconds: number;
+}
 
 function App() {
   const [apiKey, setApiKey] = useState("");
@@ -117,16 +149,18 @@ function App() {
     message: string;
     type: "success" | "error";
   } | null>(null);
-  const [activeTab, setActiveTab] = useState<"claude-code" | "claude-desktop" | "cursor">(
-    "claude-code",
-  );
+  const [activeTab, setActiveTab] = useState<
+    "claude-code" | "claude-desktop" | "cursor"
+  >("claude-code");
   const [activeSection, setActiveSection] = useState<
-    "general" | "api-key" | "tools" | "setup" | "bookmarks"
+    "general" | "api-key" | "tools" | "setup" | "bookmarks" | "cache"
   >("api-key");
 
   // Tool customization state
   const [serverDescription, setServerDescription] = useState("");
-  const [toolDescriptions, setToolDescriptions] = useState<Record<string, string>>({});
+  const [toolDescriptions, setToolDescriptions] = useState<
+    Record<string, string>
+  >({});
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [serverPath, setServerPath] = useState("");
@@ -135,10 +169,144 @@ function App() {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [bookmarksLoading, setBookmarksLoading] = useState(false);
 
+  // Cache state
+  const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncCooldown, setSyncCooldown] = useState(0);
+
   useEffect(() => {
     loadConfig();
     loadServerPath();
   }, []);
+
+  // Countdown timer for sync cooldown
+  useEffect(() => {
+    if (syncCooldown > 0) {
+      const timer = setTimeout(() => setSyncCooldown(syncCooldown - 1), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [syncCooldown]);
+
+  // Load cache status when cache section is active
+  useEffect(() => {
+    if (activeSection === "cache" && savedApiKey) {
+      loadCacheStatus();
+    }
+  }, [activeSection, savedApiKey]);
+
+  const loadCacheStatus = async () => {
+    if (!savedApiKey) return;
+
+    try {
+      const { fetch } = await import("@tauri-apps/plugin-http");
+      const response = await fetch("https://workflowy.com/api/v1/targets", {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${savedApiKey}`,
+        },
+      });
+
+      if (!response.ok) {
+        addLog("Failed to validate API key for cache status", "error");
+        return;
+      }
+
+      // Read cache status from the database file
+      const dataDir = await getDataDir();
+      const { readFile, exists } = await import("@tauri-apps/plugin-fs");
+      const dbPath = dataDir + "/bookmarks.db";
+
+      if (await exists(dbPath)) {
+        // We can't directly query SQLite from the UI, so we'll show basic info
+        // The actual status comes from the MCP server's get_cache_status tool
+        // For now, show that the database exists
+        const dbData = await readFile(dbPath);
+        if (dbData.byteLength > 0) {
+          // Database exists and has data - show a placeholder status
+          // Real status would require the MCP server to be running
+          setCacheStatus({
+            cache_populated: true,
+            node_count: -1, // Unknown from UI
+            last_sync: "Check via MCP tools",
+            hours_since_sync: null,
+            is_stale: false,
+            can_sync_now: true,
+            sync_cooldown_seconds: 0,
+          });
+        }
+      } else {
+        setCacheStatus({
+          cache_populated: false,
+          node_count: 0,
+          last_sync: "never",
+          hours_since_sync: null,
+          is_stale: true,
+          can_sync_now: true,
+          sync_cooldown_seconds: 0,
+        });
+      }
+    } catch (e) {
+      console.error("Failed to load cache status:", e);
+      addLog(`Failed to load cache status: ${e}`, "error");
+    }
+  };
+
+  const syncNow = async () => {
+    if (!savedApiKey || isSyncing) return;
+
+    setIsSyncing(true);
+    addLog("Starting node sync...", "info");
+
+    try {
+      const { fetch } = await import("@tauri-apps/plugin-http");
+      const response = await fetch(
+        "https://workflowy.com/api/v1/nodes-export",
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${savedApiKey}`,
+            "Content-Type": "application/json",
+          },
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const nodes = await response.json();
+      const nodeCount = Array.isArray(nodes) ? nodes.length : 0;
+
+      addLog(`Sync complete: ${nodeCount} nodes fetched`, "success");
+      showToast(`Synced ${nodeCount} nodes successfully`, "success");
+
+      // Update status
+      setCacheStatus({
+        cache_populated: true,
+        node_count: nodeCount,
+        last_sync: new Date().toISOString(),
+        hours_since_sync: 0,
+        is_stale: false,
+        can_sync_now: false,
+        sync_cooldown_seconds: 60,
+      });
+
+      // Start cooldown
+      setSyncCooldown(60);
+
+      // Note: The actual database update happens via the MCP server
+      // This UI sync just fetches and displays info - the MCP server handles persistence
+      showToast(
+        "Nodes fetched! Use sync_nodes via MCP for persistent cache.",
+        "success",
+      );
+    } catch (e) {
+      addLog(`Sync failed: ${e}`, "error");
+      showToast("Sync failed. Check logs for details.", "error");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   const loadConfig = async () => {
     try {
@@ -187,7 +355,9 @@ function App() {
 
   const saveConfig = async (config: Record<string, unknown>) => {
     try {
-      const { writeTextFile, mkdir, exists } = await import("@tauri-apps/plugin-fs");
+      const { writeTextFile, mkdir, exists } = await import(
+        "@tauri-apps/plugin-fs"
+      );
       const dataDir = await getDataDir();
       const configPath = dataDir + "/config.json";
 
@@ -213,7 +383,8 @@ function App() {
 
       const config: Record<string, unknown> = { apiKey: apiKey.trim() };
       if (serverDescription) config.serverDescription = serverDescription;
-      if (Object.keys(toolDescriptions).length > 0) config.toolDescriptions = toolDescriptions;
+      if (Object.keys(toolDescriptions).length > 0)
+        config.toolDescriptions = toolDescriptions;
 
       await saveConfig(config);
 
@@ -246,7 +417,10 @@ function App() {
       await saveConfig(config);
       setHasUnsavedChanges(false);
       addLog("Tool customizations saved", "success");
-      showToast("Customizations saved! Restart your MCP client to apply changes.", "success");
+      showToast(
+        "Customizations saved! Restart your MCP client to apply changes.",
+        "success",
+      );
     } catch (e) {
       addLog(`Failed to save customizations: ${e}`, "error");
       showToast("Failed to save customizations", "error");
@@ -399,7 +573,10 @@ function App() {
           workflowy: {
             type: "stdio",
             command: "node",
-            args: [serverPath || "~/Library/Application Support/workflowy-mcp/server.cjs"],
+            args: [
+              serverPath ||
+                "~/Library/Application Support/workflowy-mcp/server.cjs",
+            ],
           },
         },
       },
@@ -415,7 +592,8 @@ function App() {
           workflowy: {
             command: "node",
             args: [
-              serverPath || "/Users/USERNAME/Library/Application Support/workflowy-mcp/server.cjs",
+              serverPath ||
+                "/Users/USERNAME/Library/Application Support/workflowy-mcp/server.cjs",
             ],
           },
         },
@@ -432,7 +610,8 @@ function App() {
           workflowy: {
             command: "node",
             args: [
-              serverPath || "/Users/USERNAME/Library/Application Support/workflowy-mcp/server.cjs",
+              serverPath ||
+                "/Users/USERNAME/Library/Application Support/workflowy-mcp/server.cjs",
             ],
           },
         },
@@ -504,6 +683,12 @@ function App() {
             <span>Bookmarks</span>
           </div>
           <div
+            className={`nav-item ${activeSection === "cache" ? "active" : ""}`}
+            onClick={() => setActiveSection("cache")}
+          >
+            <span>Cache</span>
+          </div>
+          <div
             className={`nav-item ${activeSection === "general" ? "active" : ""}`}
             onClick={() => setActiveSection("general")}
           >
@@ -554,7 +739,9 @@ function App() {
                   <div className="api-key-status">
                     <div className="api-key-info">
                       <span className="api-key-label">Current API Key:</span>
-                      <code className="api-key-masked">{maskApiKey(savedApiKey)}</code>
+                      <code className="api-key-masked">
+                        {maskApiKey(savedApiKey)}
+                      </code>
                     </div>
                     <span className="api-key-validated">Validated</span>
                   </div>
@@ -568,7 +755,10 @@ function App() {
                     >
                       Change Key
                     </button>
-                    <button className="button button-danger" onClick={clearApiKey}>
+                    <button
+                      className="button button-danger"
+                      onClick={clearApiKey}
+                    >
                       Clear Key
                     </button>
                   </div>
@@ -584,7 +774,10 @@ function App() {
                       placeholder="wf_xxxxxxxxxxxx"
                     />
                   </div>
-                  <button className="button button-primary" onClick={saveApiKey}>
+                  <button
+                    className="button button-primary"
+                    onClick={saveApiKey}
+                  >
                     Validate & Save
                   </button>
                 </>
@@ -603,8 +796,8 @@ function App() {
               <div className="input-group">
                 <label>Server Instructions</label>
                 <p className="field-hint">
-                  These instructions help the AI understand how to use the Workflowy tools
-                  effectively.
+                  These instructions help the AI understand how to use the
+                  Workflowy tools effectively.
                 </p>
                 <div className="description-with-reset">
                   <textarea
@@ -631,13 +824,18 @@ function App() {
                 <label>Tool Descriptions</label>
                 {defaultTools.map((tool) => (
                   <div key={tool.name} className="tool-item">
-                    <div className="tool-header" onClick={() => toggleToolExpanded(tool.name)}>
+                    <div
+                      className="tool-header"
+                      onClick={() => toggleToolExpanded(tool.name)}
+                    >
                       <span className="tool-expand-icon">
                         {expandedTools.has(tool.name) ? "▼" : "▶"}
                       </span>
                       <span className="tool-name">{tool.name}</span>
                       {isToolCustomized(tool.name) && (
-                        <span className="tool-customized-badge">customized</span>
+                        <span className="tool-customized-badge">
+                          customized
+                        </span>
                       )}
                     </div>
                     {expandedTools.has(tool.name) && (
@@ -645,7 +843,9 @@ function App() {
                         <div className="description-with-reset">
                           <textarea
                             value={getToolDescription(tool.name)}
-                            onChange={(e) => updateToolDescription(tool.name, e.target.value)}
+                            onChange={(e) =>
+                              updateToolDescription(tool.name, e.target.value)
+                            }
                             rows={3}
                           />
                           <button
@@ -708,15 +908,19 @@ function App() {
                 </p>
               </div>
 
-              <button className="copy-button" onClick={() => copyConfig(getActiveConfig())}>
+              <button
+                className="copy-button"
+                onClick={() => copyConfig(getActiveConfig())}
+              >
                 Copy Configuration
               </button>
               <div className="config-preview">{getActiveConfig()}</div>
 
               <div className="info-box">
                 <p>
-                  <strong>How it works:</strong> MCP clients like Claude Code spawn the server
-                  automatically when needed. No manual server management required.
+                  <strong>How it works:</strong> MCP clients like Claude Code
+                  spawn the server automatically when needed. No manual server
+                  management required.
                 </p>
               </div>
             </>
@@ -746,8 +950,8 @@ function App() {
                 <div className="bookmarks-empty">
                   <p>No bookmarks saved yet.</p>
                   <p className="hint">
-                    Bookmarks are created when an LLM uses the save_bookmark tool to remember
-                    Workflowy node locations.
+                    Bookmarks are created when an LLM uses the save_bookmark
+                    tool to remember Workflowy node locations.
                   </p>
                 </div>
               ) : (
@@ -761,13 +965,20 @@ function App() {
                     </div>
                     {bookmarks.map((bookmark) => (
                       <div key={bookmark.name} className="bookmark-row">
-                        <span className="bookmark-col-name" title={bookmark.name}>
+                        <span
+                          className="bookmark-col-name"
+                          title={bookmark.name}
+                        >
                           {bookmark.name}
                         </span>
                         <span className="bookmark-col-id">
-                          <code title={bookmark.node_id}>{bookmark.node_id}</code>
+                          <code title={bookmark.node_id}>
+                            {bookmark.node_id}
+                          </code>
                         </span>
-                        <span className="bookmark-col-date">{formatDate(bookmark.created_at)}</span>
+                        <span className="bookmark-col-date">
+                          {formatDate(bookmark.created_at)}
+                        </span>
                         <span className="bookmark-col-actions">
                           <button
                             className="button button-danger button-small"
@@ -785,8 +996,119 @@ function App() {
             </>
           )}
 
+          {/* Cache Section */}
+          {activeSection === "cache" && (
+            <>
+              <div className="header">
+                <h1>Node Cache</h1>
+                <p>
+                  Local cache for fast searching. The cache syncs automatically
+                  when the MCP server starts.
+                </p>
+              </div>
+
+              {!savedApiKey ? (
+                <div className="info-box">
+                  <p>
+                    <strong>API Key Required:</strong> Please configure your API
+                    key first to use cache features.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="cache-status">
+                    <h3>Cache Status</h3>
+                    {cacheStatus ? (
+                      <div className="status-grid">
+                        <div className="status-item">
+                          <span className="status-label">Status:</span>
+                          <span
+                            className={`status-value ${cacheStatus.cache_populated ? "status-good" : "status-warning"}`}
+                          >
+                            {cacheStatus.cache_populated
+                              ? "Populated"
+                              : "Empty"}
+                          </span>
+                        </div>
+                        {cacheStatus.node_count >= 0 && (
+                          <div className="status-item">
+                            <span className="status-label">Nodes:</span>
+                            <span className="status-value">
+                              {cacheStatus.node_count.toLocaleString()}
+                            </span>
+                          </div>
+                        )}
+                        <div className="status-item">
+                          <span className="status-label">Last Sync:</span>
+                          <span className="status-value">
+                            {cacheStatus.last_sync === "never"
+                              ? "Never"
+                              : cacheStatus.last_sync === "Check via MCP tools"
+                                ? "Check via MCP tools"
+                                : new Date(
+                                    cacheStatus.last_sync,
+                                  ).toLocaleString()}
+                          </span>
+                        </div>
+                        {cacheStatus.hours_since_sync !== null && (
+                          <div className="status-item">
+                            <span className="status-label">Freshness:</span>
+                            <span
+                              className={`status-value ${cacheStatus.is_stale ? "status-warning" : "status-good"}`}
+                            >
+                              {cacheStatus.is_stale ? "Stale" : "Fresh"}
+                              {cacheStatus.hours_since_sync !== null &&
+                                ` (${cacheStatus.hours_since_sync.toFixed(1)}h ago)`}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <p>Loading cache status...</p>
+                    )}
+                  </div>
+
+                  <div className="cache-actions">
+                    <button
+                      className={`button button-primary ${isSyncing || syncCooldown > 0 ? "button-disabled" : ""}`}
+                      onClick={syncNow}
+                      disabled={isSyncing || syncCooldown > 0}
+                    >
+                      {isSyncing
+                        ? "Syncing..."
+                        : syncCooldown > 0
+                          ? `Wait ${syncCooldown}s`
+                          : "Sync Now"}
+                    </button>
+                    <button
+                      className="button button-secondary"
+                      onClick={loadCacheStatus}
+                    >
+                      Refresh Status
+                    </button>
+                  </div>
+
+                  <div className="info-box">
+                    <p>
+                      <strong>Note:</strong> The cache is managed by the MCP
+                      server. Use the <code>sync_nodes</code> tool via your MCP
+                      client for persistent syncing, or use the{" "}
+                      <code>search_nodes</code> tool to search cached content.
+                    </p>
+                    <p style={{ marginTop: "8px" }}>
+                      <strong>Rate Limit:</strong> The Workflowy API limits
+                      export requests to 1 per minute.
+                    </p>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
           {/* Toast */}
-          {toast && <div className={`toast ${toast.type}`}>{toast.message}</div>}
+          {toast && (
+            <div className={`toast ${toast.type}`}>{toast.message}</div>
+          )}
         </div>
       </div>
     </div>

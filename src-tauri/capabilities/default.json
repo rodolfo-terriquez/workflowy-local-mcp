@@ -2,18 +2,26 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": [
-    "main"
-  ],
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "opener:default",
     "shell:default",
     "shell:allow-spawn",
     "shell:allow-execute",
+    "http:default",
+    {
+      "identifier": "http:allow-fetch",
+      "allow": [
+        {
+          "url": "https://workflowy.com/*"
+        }
+      ]
+    },
     "fs:default",
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
+    "fs:allow-read-file",
     "fs:allow-exists",
     "fs:allow-mkdir",
     "fs:allow-app-read",
@@ -22,10 +30,7 @@
     "fs:allow-app-write-recursive",
     {
       "identifier": "fs:scope",
-      "allow": [
-        "$APPDATA/**",
-        "$APPDATA"
-      ]
+      "allow": ["$APPDATA/**", "$APPDATA"]
     }
   ]
 }
