@@ -41,9 +41,8 @@ The server maintains a local cache of all nodes for fast searching:
 
 **Cache management:**
 - Use sync_nodes to refresh the cache (rate limited to 1 request per minute)
-- Use get_cache_status to check when cache was last updated
 - Cache updates automatically after create/update/delete/move/complete operations
-- Cache auto-syncs on server startup if stale (>24 hours)
+- Cache auto-syncs on server startup if stale (>1 hour)
 
 ## Common Workflows
 
@@ -123,11 +122,6 @@ const defaultTools: ToolDefinition[] = [
     name: "sync_nodes",
     defaultDescription:
       "Sync all Workflowy nodes to local cache for searching. Rate limited to once per minute. Use this before searching if cache is empty or stale.",
-  },
-  {
-    name: "get_cache_status",
-    defaultDescription:
-      "Get the status of the local node cache including last sync time, node count, and freshness.",
   },
 ];
 
@@ -696,7 +690,7 @@ function App() {
           </div>
         </div>
         <div className="sidebar-footer">
-          <span className="version">v1.0.1</span>
+          <span className="version">v1.0.3</span>
         </div>
       </div>
 

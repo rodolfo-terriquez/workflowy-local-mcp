@@ -4,9 +4,11 @@ A local MCP server that lets LLMs read and write to your Workflowy account.
 
 ## Features
 
-- **13 tools** for managing Workflowy nodes (create, update, delete, move, complete)
+- **12 tools** for managing Workflowy nodes (create, update, delete, move, complete)
+- **Local cache** with fast full-text search across all your nodes
 - **Bookmarks** to save frequently-used node locations
-- **Customizable** tool descriptions to tune Claude's behavior
+- **Customizable** tool descriptions to tune AI behavior
+- **Auto-sync** keeps cache fresh (syncs on startup if stale >1 hour)
 - **Fully local** — your API key never leaves your machine
 
 ## Installation
@@ -34,16 +36,24 @@ A local MCP server that lets LLMs read and write to your Workflowy account.
 | `save_bookmark` | Save a node ID with a friendly name |
 | `list_bookmarks` | List all saved bookmarks |
 | `delete_bookmark` | Delete a bookmark |
-| `list_nodes` | List children of a node |
-| `get_node` | Get a single node by ID |
+| `get_node_tree` | Get a node and its nested children from the local cache |
 | `get_targets` | Get special locations (inbox, home) |
-| `export_all_nodes` | Export all nodes (1 req/min limit) |
 | `create_node` | Create a new node |
 | `update_node` | Update a node's name or note |
-| `delete_node` | Delete a node |
+| `delete_node` | Delete a node and all its children |
 | `move_node` | Move a node to a new parent |
-| `complete_node` | Mark a node as complete |
-| `uncomplete_node` | Mark a node as incomplete |
+| `set_completed` | Set a node's completed status (checked/unchecked) |
+| `search_nodes` | Search locally cached nodes by text |
+| `sync_nodes` | Sync all nodes to local cache (1 req/min rate limit) |
+
+## How It Works
+
+The server maintains a local SQLite cache of all your Workflowy nodes for fast searching:
+
+- **Auto-sync on startup**: If the cache is empty or stale (>1 hour), it syncs automatically
+- **Optimistic updates**: Create, update, delete, move, and complete operations update the cache immediately
+- **Full-text search**: `search_nodes` searches both node names and notes, returning results with breadcrumb paths
+- **Rate limiting**: The Workflowy API limits exports to 1 request per minute
 
 ## Building from Source
 
