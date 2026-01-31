@@ -70,6 +70,28 @@ struct Bookmark {
     created_at: Option<String>,
 }
 
+/// Run database migrations to ensure schema is up to date
+fn run_migrations(conn: &Connection) -> Result<(), String> {
+    // Check if context column exists in bookmarks table
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(bookmarks)")
+        .map_err(|e| format!("Failed to get table info: {}", e))?;
+    
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("Failed to query table info: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+    
+    // Add context column if it doesn't exist
+    if !columns.contains(&"context".to_string()) {
+        conn.execute("ALTER TABLE bookmarks ADD COLUMN context TEXT", [])
+            .map_err(|e| format!("Failed to add context column: {}", e))?;
+    }
+    
+    Ok(())
+}
+
 #[tauri::command]
 fn get_bookmarks(app_handle: tauri::AppHandle) -> Result<Vec<Bookmark>, String> {
     let app_data = app_handle
@@ -83,6 +105,9 @@ fn get_bookmarks(app_handle: tauri::AppHandle) -> Result<Vec<Bookmark>, String> 
     }
 
     let conn = Connection::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
+    
+    // Run migrations before querying
+    run_migrations(&conn)?;
 
     let mut stmt = conn
         .prepare("SELECT name, node_id, context, created_at FROM bookmarks ORDER BY name")

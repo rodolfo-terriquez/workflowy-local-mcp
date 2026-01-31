@@ -93,6 +93,16 @@ async function getDb(): Promise<Database> {
     )
   `);
 
+  // Migration: Add context column to existing bookmarks table if it doesn't exist
+  // This handles databases created before the context column was added
+  const bookmarksTableInfo = dbInstance.exec("PRAGMA table_info(bookmarks)");
+  if (bookmarksTableInfo.length > 0) {
+    const columns = bookmarksTableInfo[0].values.map((row) => row[1]); // column name is at index 1
+    if (!columns.includes("context")) {
+      dbInstance.run("ALTER TABLE bookmarks ADD COLUMN context TEXT");
+    }
+  }
+
   // Create nodes cache table (with children_count and priority for ordering)
   dbInstance.run(`
     CREATE TABLE IF NOT EXISTS nodes (
@@ -107,6 +117,24 @@ async function getDb(): Promise<Database> {
       updated_at TEXT
     )
   `);
+
+  // Migration: Add missing columns to existing nodes table
+  const nodesTableInfo = dbInstance.exec("PRAGMA table_info(nodes)");
+  if (nodesTableInfo.length > 0) {
+    const columns = nodesTableInfo[0].values.map((row) => row[1]); // column name is at index 1
+    if (!columns.includes("children_count")) {
+      dbInstance.run("ALTER TABLE nodes ADD COLUMN children_count INTEGER DEFAULT 0");
+    }
+    if (!columns.includes("priority")) {
+      dbInstance.run("ALTER TABLE nodes ADD COLUMN priority INTEGER DEFAULT 0");
+    }
+    if (!columns.includes("created_at")) {
+      dbInstance.run("ALTER TABLE nodes ADD COLUMN created_at TEXT");
+    }
+    if (!columns.includes("updated_at")) {
+      dbInstance.run("ALTER TABLE nodes ADD COLUMN updated_at TEXT");
+    }
+  }
 
   // Create indexes for efficient querying
   // Note: sql.js doesn't support FTS5, so we use LIKE with indexes
