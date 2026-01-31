@@ -17,6 +17,7 @@ interface ToolDefinition {
 interface Bookmark {
   name: string;
   node_id: string;
+  context: string | null;
   created_at: string | null;
 }
 
@@ -25,57 +26,64 @@ const defaultServerInstructions = `This MCP server connects to a user's Workflow
 
 ## Key Concepts
 - Nodes have a UUID (id), name (text content), and optional note (description)
-- Nodes can be nested under other nodes (parent_id)
+- Nodes can be nested infinitely under other nodes (parent_id)
 - Special locations: 'inbox', 'home', or 'None' (top-level)
 
-## Bookmarks
-Bookmarks let you save node IDs with friendly names. When a user mentions a named location (like "my work inbox" or "project notes"), use list_bookmarks to see all saved bookmarks and pick the one that best matches what the user is referring to.
+## Start with Bookmarks
+**Always check bookmarks first** when the user asks about specific content. Bookmarks contain context notes that tell you what each location contains and how to use it.
 
-## Local Search
-The server maintains a local cache of all nodes for fast searching:
+1. Call list_bookmarks to see all saved locations with their context
+2. If a relevant bookmark exists, use get_node_tree with that node_id
+3. If no bookmark matches, use search_nodes to find the content
 
-**Searching for nodes:**
-1. Use search_nodes to find nodes by text (searches name and note fields)
-2. Results include the full path to each node and the node ID
-3. Use the returned node_id with other tools (create_node, update_node, etc.)
+## Search with Child Previews
+search_nodes returns matches with a **preview of their children** (first 5 children + total count). This lets you evaluate which result is relevant in ONE call:
 
-**Cache management:**
-- Use sync_nodes to refresh the cache (rate limited to 1 request per minute)
-- Cache updates automatically after create/update/delete/move/complete operations
-- Cache auto-syncs on server startup if stale (>1 hour)
+- children_count: How many items are inside this node
+- children_preview: First 5 children with their names and child counts
+- Use this to identify the right result without needing additional reads
+
+## Saving Bookmarks with Context
+When you find an important location, save it with context notes for future sessions:
+
+save_bookmark(
+  name: "daily_tasks",
+  node_id: "abc-123",
+  context: "User's daily todo list. Items use [ ] for incomplete, [x] for complete."
+)
+
+The context field is for YOU to write notes about what the node contains, how items are formatted, and when to use this bookmark.
 
 ## Common Workflows
 
-**Finding and modifying content:**
-1. search_nodes with relevant keywords
-2. Use the returned node_id with update_node, delete_node, move_node, etc.
+**Answering "What are my tasks?"**
+1. list_bookmarks - Check if a tasks bookmark exists with context
+2. If yes: get_node_tree with that node_id
+3. If no: search_nodes("tasks") - Use children_preview to pick the right result, then save bookmark
 
-**Adding content to a bookmarked location:**
-1. list_bookmarks to see all saved locations
-2. Pick the bookmark that best matches what the user mentioned
-3. create_node with that node_id as parent_id
+**Creating new content:**
+1. list_bookmarks to find the right parent location
+2. create_node with that node_id as parent_id
 
-**Exploring the hierarchy:**
-1. get_node_tree with node_id='None' to see top-level nodes with children
-2. get_node_tree with a specific node_id and depth to explore nested content
+**Marking tasks complete:**
+- update_node with completed=true
 
 ## Tips
-- Use search_nodes first when looking for specific content
-- Use get_node_tree to explore node hierarchies from the local cache
-- Always use list_bookmarks when the user refers to a named location
-- Node names support basic formatting and markdown`;
+- Search results include children_preview so you can evaluate relevance in one call
+- Save bookmarks with detailed context to speed up future sessions
+- The cache auto-syncs when stale (>1 hour) but you can force sync with sync_nodes`;
 
 // Default tool definitions matching the MCP server
 const defaultTools: ToolDefinition[] = [
   {
     name: "save_bookmark",
     defaultDescription:
-      "Save a Workflowy node ID with a friendly name for easy reference later. Check similar bookmarks before creating a new one to avoid duplicates.",
+      "Save a Workflowy node with a name and context notes. The context field is for YOU (the LLM) to write notes about what this node contains and how to use it in future sessions.",
   },
   {
     name: "list_bookmarks",
     defaultDescription:
-      "List all saved Workflowy bookmarks. Use this to see what locations have been bookmarked.",
+      "List all saved bookmarks with their context notes. Start here to see what locations you've already discovered and saved.",
   },
   {
     name: "delete_bookmark",
@@ -84,12 +92,7 @@ const defaultTools: ToolDefinition[] = [
   {
     name: "get_node_tree",
     defaultDescription:
-      "Get a node and its nested children from the local cache. Returns the node with its hierarchy up to the specified depth. Use sync_nodes first if cache is empty.",
-  },
-  {
-    name: "get_targets",
-    defaultDescription:
-      "Get special Workflowy targets like 'inbox' and 'home'. Useful for discovering available special locations.",
+      "Get a node and its nested children from the local cache. Returns the node with its hierarchy up to the specified depth.",
   },
   {
     name: "create_node",
@@ -98,7 +101,8 @@ const defaultTools: ToolDefinition[] = [
   },
   {
     name: "update_node",
-    defaultDescription: "Update an existing node's name or note.",
+    defaultDescription:
+      "Update an existing node's name, note, or completed status. Use this to edit content or mark tasks complete/incomplete.",
   },
   {
     name: "delete_node",
@@ -110,18 +114,14 @@ const defaultTools: ToolDefinition[] = [
     defaultDescription: "Move a node to a different parent location.",
   },
   {
-    name: "set_completed",
-    defaultDescription: "Set a node's completed status (checked/unchecked).",
-  },
-  {
     name: "search_nodes",
     defaultDescription:
-      "Search locally cached Workflowy nodes by text. Returns matching nodes with their full path. Use sync_nodes first if cache is empty or stale.",
+      "Search Workflowy nodes by text. Returns matches with their path AND a preview of their children (first 5 children with their child counts).",
   },
   {
     name: "sync_nodes",
     defaultDescription:
-      "Sync all Workflowy nodes to local cache for searching. Rate limited to once per minute. Use this before searching if cache is empty or stale.",
+      "Sync all Workflowy nodes to local cache for searching. Rate limited to once per minute.",
   },
 ];
 
@@ -162,6 +162,8 @@ function App() {
   // Bookmarks state
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [bookmarksLoading, setBookmarksLoading] = useState(false);
+  const [editingBookmark, setEditingBookmark] = useState<string | null>(null);
+  const [editingContext, setEditingContext] = useState<string>("");
 
   // Cache state
   const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
@@ -264,11 +266,23 @@ function App() {
         },
       );
 
+      const data = await response.json();
+      
+      // Check for rate limit error
+      if (data.error) {
+        const retryAfter = data.retry_after || 60;
+        addLog(`API rate limited. Retry after ${retryAfter} seconds.`, "error");
+        showToast(`Rate limited. Wait ${retryAfter}s and try again.`, "error");
+        setSyncCooldown(retryAfter);
+        return;
+      }
+
       if (!response.ok) {
         throw new Error(`API error: ${response.status}`);
       }
 
-      const nodes = await response.json();
+      // API returns { nodes: [...] }, not just an array
+      const nodes = data.nodes || [];
       const nodeCount = Array.isArray(nodes) ? nodes.length : 0;
 
       addLog(`Sync complete: ${nodeCount} nodes fetched`, "success");
@@ -474,6 +488,33 @@ function App() {
     } catch (e) {
       console.error("Failed to delete bookmark:", e);
       showToast("Failed to delete bookmark", "error");
+    }
+  };
+
+  const startEditingContext = (bookmark: Bookmark) => {
+    setEditingBookmark(bookmark.name);
+    setEditingContext(bookmark.context || "");
+  };
+
+  const cancelEditingContext = () => {
+    setEditingBookmark(null);
+    setEditingContext("");
+  };
+
+  const saveBookmarkContext = async (name: string) => {
+    try {
+      const context = editingContext.trim() || null;
+      await invoke("update_bookmark_context", { name, context });
+      setBookmarks((prev) =>
+        prev.map((b) => (b.name === name ? { ...b, context } : b)),
+      );
+      setEditingBookmark(null);
+      setEditingContext("");
+      showToast("Context updated", "success");
+      addLog(`Updated context for bookmark: ${name}`, "info");
+    } catch (e) {
+      console.error("Failed to update bookmark context:", e);
+      showToast("Failed to update context", "error");
     }
   };
 
@@ -950,41 +991,75 @@ function App() {
                 </div>
               ) : (
                 <div className="bookmarks-list">
-                  <div className="bookmarks-table">
-                    <div className="bookmarks-header">
-                      <span className="bookmark-col-name">Name</span>
-                      <span className="bookmark-col-id">Node ID</span>
-                      <span className="bookmark-col-date">Created</span>
-                      <span className="bookmark-col-actions">Actions</span>
-                    </div>
-                    {bookmarks.map((bookmark) => (
-                      <div key={bookmark.name} className="bookmark-row">
-                        <span
-                          className="bookmark-col-name"
-                          title={bookmark.name}
-                        >
-                          {bookmark.name}
-                        </span>
-                        <span className="bookmark-col-id">
-                          <code title={bookmark.node_id}>
-                            {bookmark.node_id}
-                          </code>
-                        </span>
-                        <span className="bookmark-col-date">
+                  {bookmarks.map((bookmark) => (
+                    <div key={bookmark.name} className="bookmark-card">
+                      <div className="bookmark-card-header">
+                        <span className="bookmark-name">{bookmark.name}</span>
+                        <span className="bookmark-date">
                           {formatDate(bookmark.created_at)}
                         </span>
-                        <span className="bookmark-col-actions">
-                          <button
-                            className="button button-danger button-small"
-                            onClick={() => deleteBookmark(bookmark.name)}
-                            title="Delete bookmark"
-                          >
-                            Delete
-                          </button>
-                        </span>
                       </div>
-                    ))}
-                  </div>
+                      <div className="bookmark-node-id">
+                        <code title={bookmark.node_id}>{bookmark.node_id}</code>
+                      </div>
+                      <div className="bookmark-context-section">
+                        <label className="bookmark-context-label">
+                          Context (LLM notes):
+                        </label>
+                        {editingBookmark === bookmark.name ? (
+                          <div className="bookmark-context-edit">
+                            <textarea
+                              value={editingContext}
+                              onChange={(e) => setEditingContext(e.target.value)}
+                              placeholder="Notes about what this node contains and how to use it..."
+                              rows={3}
+                            />
+                            <div className="bookmark-context-actions">
+                              <button
+                                className="button button-primary button-small"
+                                onClick={() => saveBookmarkContext(bookmark.name)}
+                              >
+                                Save
+                              </button>
+                              <button
+                                className="button button-secondary button-small"
+                                onClick={cancelEditingContext}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="bookmark-context-display">
+                            {bookmark.context ? (
+                              <p className="bookmark-context-text">
+                                {bookmark.context}
+                              </p>
+                            ) : (
+                              <p className="bookmark-context-empty">
+                                No context set. Click Edit to add notes.
+                              </p>
+                            )}
+                            <button
+                              className="button button-secondary button-small"
+                              onClick={() => startEditingContext(bookmark)}
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <div className="bookmark-card-actions">
+                        <button
+                          className="button button-danger button-small"
+                          onClick={() => deleteBookmark(bookmark.name)}
+                          title="Delete bookmark"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </>

@@ -83,16 +83,17 @@ async function getDb(): Promise<Database> {
     dbInstance = new SQL.Database();
   }
 
-  // Create table if it doesn't exist
+  // Create table if it doesn't exist (with context field for LLM notes)
   dbInstance.run(`
     CREATE TABLE IF NOT EXISTS bookmarks (
       name TEXT PRIMARY KEY,
       node_id TEXT NOT NULL,
+      context TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
-  // Create nodes cache table
+  // Create nodes cache table (with children_count and priority for ordering)
   dbInstance.run(`
     CREATE TABLE IF NOT EXISTS nodes (
       id TEXT PRIMARY KEY,
@@ -100,17 +101,30 @@ async function getDb(): Promise<Database> {
       note TEXT DEFAULT '',
       parent_id TEXT,
       completed INTEGER DEFAULT 0,
+      children_count INTEGER DEFAULT 0,
+      priority INTEGER DEFAULT 0,
       created_at TEXT,
       updated_at TEXT
     )
   `);
 
   // Create indexes for efficient querying
+  // Note: sql.js doesn't support FTS5, so we use LIKE with indexes
   dbInstance.run(
     `CREATE INDEX IF NOT EXISTS idx_nodes_parent_id ON nodes(parent_id)`,
   );
   dbInstance.run(
     `CREATE INDEX IF NOT EXISTS idx_nodes_completed ON nodes(completed)`,
+  );
+  dbInstance.run(
+    `CREATE INDEX IF NOT EXISTS idx_nodes_priority ON nodes(parent_id, priority)`,
+  );
+  // Index for text search (helps with LIKE queries on large datasets)
+  dbInstance.run(
+    `CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name)`,
+  );
+  dbInstance.run(
+    `CREATE INDEX IF NOT EXISTS idx_nodes_note ON nodes(note)`,
   );
 
   // Create sync metadata table
@@ -330,6 +344,7 @@ async function performFullSync(
         note?: string;
         parent_id?: string;
         completed?: boolean;
+        priority?: number;
         createdAt?: number;
         modifiedAt?: number;
       }>;
@@ -337,19 +352,33 @@ async function performFullSync(
 
     const nodes = responseData.nodes || [];
 
+    // Build a map to count children for each node
+    const childrenCountMap = new Map<string, number>();
+    for (const node of nodes) {
+      if (node.parent_id) {
+        childrenCountMap.set(
+          node.parent_id,
+          (childrenCountMap.get(node.parent_id) || 0) + 1,
+        );
+      }
+    }
+
     // Transactional update
     db.run("BEGIN TRANSACTION");
     db.run("DELETE FROM nodes");
 
     for (const node of nodes) {
+      const childrenCount = childrenCountMap.get(node.id) || 0;
       db.run(
-        "INSERT INTO nodes (id, name, note, parent_id, completed, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           node.id,
           node.name || "",
           node.note || "",
           node.parent_id || null,
           node.completed ? 1 : 0,
+          childrenCount,
+          node.priority || 0,
           node.createdAt ? new Date(node.createdAt * 1000).toISOString() : null,
           node.modifiedAt
             ? new Date(node.modifiedAt * 1000).toISOString()
@@ -595,18 +624,23 @@ const defaultTools = [
   {
     name: "save_bookmark",
     description:
-      "Save a Workflowy node ID with a friendly name for easy reference later. Check similar bookmarks before creating a new one to avoid duplicates.",
+      "Save a Workflowy node with a name and context notes. The context field is for YOU (the LLM) to write notes about what this node contains and how to use it in future sessions. Check similar bookmarks before creating a new one to avoid duplicates.",
     inputSchema: {
       type: "object",
       properties: {
         name: {
           type: "string",
           description:
-            "A friendly name for the bookmark (e.g., 'special_inbox', 'work_tasks')",
+            "A friendly name for the bookmark (e.g., 'daily_tasks', 'project_notes')",
         },
         node_id: {
           type: "string",
           description: "The Workflowy node UUID to bookmark",
+        },
+        context: {
+          type: "string",
+          description:
+            "Notes for your future self about this bookmark. Describe what the node contains, how items are formatted, and when to use it. Example: 'User\\'s daily todo list. Items use [ ] for incomplete, [x] for complete. Check here first when user asks about tasks.'",
         },
       },
       required: ["name", "node_id"],
@@ -615,7 +649,7 @@ const defaultTools = [
   {
     name: "list_bookmarks",
     description:
-      "List all saved Workflowy bookmarks. Use this to see what locations have been bookmarked.",
+      "List all saved bookmarks with their context notes. Start here to see what locations you've already discovered and saved. The context field contains notes about what each bookmark contains.",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -651,12 +685,6 @@ const defaultTools = [
       required: ["node_id"],
     },
   },
-  {
-    name: "get_targets",
-    description:
-      "Get special Workflowy targets like 'inbox' and 'home'. Useful for discovering available special locations.",
-    inputSchema: { type: "object", properties: {} },
-  },
   // Workflowy write tools
   {
     name: "create_node",
@@ -681,13 +709,19 @@ const defaultTools = [
   },
   {
     name: "update_node",
-    description: "Update an existing node's name or note.",
+    description:
+      "Update an existing node's name, note, or completed status. Use this to edit content or mark tasks complete/incomplete.",
     inputSchema: {
       type: "object",
       properties: {
         node_id: { type: "string", description: "The node UUID to update" },
         name: { type: "string", description: "New name/text for the node" },
         note: { type: "string", description: "New note for the node" },
+        completed: {
+          type: "boolean",
+          description:
+            "Set completed status: true to mark complete (checked), false to mark incomplete (unchecked)",
+        },
       },
       required: ["node_id"],
     },
@@ -720,29 +754,11 @@ const defaultTools = [
       required: ["node_id", "parent_id"],
     },
   },
-  {
-    name: "set_completed",
-    description: "Set a node's completed status (checked/unchecked).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        node_id: {
-          type: "string",
-          description: "The node UUID to update",
-        },
-        completed: {
-          type: "boolean",
-          description: "True to mark complete, false to mark incomplete",
-        },
-      },
-      required: ["node_id", "completed"],
-    },
-  },
   // Cache and search tools
   {
     name: "search_nodes",
     description:
-      "Search locally cached Workflowy nodes by text. Returns matching nodes with their full path. Use sync_nodes first if cache is empty or stale.",
+      "Search Workflowy nodes by text. Returns matches with their path AND a preview of their children (first 5 children with their child counts). Use the children_preview to evaluate which result is most relevant without needing additional reads.",
     inputSchema: {
       type: "object",
       properties: {
@@ -795,41 +811,57 @@ const defaultServerInstructions = `This MCP server connects to a user's Workflow
 
 ## Key Concepts
 - Nodes have a UUID (id), name (text content), and optional note (description)
-- Nodes can be nested under other nodes (parent_id)
+- Nodes can be nested infinitely under other nodes (parent_id)
 - Special locations: 'inbox', 'home', or 'None' (top-level)
 
-## Bookmarks
-Bookmarks let you save node IDs with friendly names. When a user mentions a named location (like "my work inbox" or "project notes"), use list_bookmarks to see all saved bookmarks and pick the one that best matches what the user is referring to.
+## Start with Bookmarks
+**Always check bookmarks first** when the user asks about specific content. Bookmarks contain context notes that tell you what each location contains and how to use it.
 
-## Local Search
-The server maintains a local cache of all nodes for fast searching:
+1. Call list_bookmarks to see all saved locations with their context
+2. If a relevant bookmark exists, use get_node_tree with that node_id
+3. If no bookmark matches, use search_nodes to find the content
 
-- Use search_nodes to find nodes by text in name or note fields
-- Results include the full path to each node and the node ID
-- Cache syncs automatically when empty or stale (>1 hour)
-- Use sync_nodes to manually force a refresh if needed (1/min rate limit)
-- Cache updates automatically after create/update/delete/move/complete operations
+## Search with Child Previews
+search_nodes returns matches with a **preview of their children** (first 5 children + total count). This lets you evaluate which result is relevant in ONE call:
+
+- children_count: How many items are inside this node
+- children_preview: First 5 children with their names and child counts
+- Use this to identify the right result without needing additional reads
+
+## Saving Bookmarks with Context
+When you find an important location, save it with context notes for future sessions:
+
+\`\`\`
+save_bookmark(
+  name: "daily_tasks",
+  node_id: "abc-123",
+  context: "User's daily todo list. Items use [ ] for incomplete, [x] for complete. Check here first when user asks about tasks."
+)
+\`\`\`
+
+The context field is for YOU to write notes about:
+- What the node contains
+- How items are formatted
+- When to use this bookmark
 
 ## Common Workflows
 
-**Finding and modifying content:**
-1. search_nodes with relevant keywords
-2. Use the returned node_id with update_node, delete_node, move_node, etc.
+**Answering "What are my tasks?"**
+1. list_bookmarks → Check if a tasks bookmark exists with context
+2. If yes: get_node_tree with that node_id
+3. If no: search_nodes("tasks") → Use children_preview to pick the right result → Save bookmark for next time
 
-**Adding content to a bookmarked location:**
-1. list_bookmarks to see all saved locations
-2. Pick the bookmark that best matches what the user mentioned
-3. create_node with that node_id as parent_id
+**Creating new content:**
+1. list_bookmarks to find the right parent location
+2. create_node with that node_id as parent_id
 
-**Exploring the hierarchy:**
-1. get_node_tree with node_id='None' to see top-level nodes with children
-2. get_node_tree with a specific node_id and depth to explore nested content
+**Marking tasks complete:**
+- update_node with completed=true
 
 ## Tips
-- Use search_nodes first when looking for specific content
-- Use get_node_tree to explore node hierarchies from the local cache
-- Always use list_bookmarks when the user refers to a named location
-- Node names support basic formatting and markdown`;
+- Search results include children_preview so you can evaluate relevance in one call
+- Save bookmarks with detailed context to speed up future sessions
+- The cache auto-syncs when stale (>1 hour) but you can force sync with sync_nodes`;
 
 // Get server instructions dynamically
 function getServerInstructions(): string {
@@ -901,18 +933,22 @@ async function main() {
     switch (name) {
       // Bookmark operations
       case "save_bookmark": {
+        const name = args.name as string;
+        const nodeId = args.node_id as string;
+        const context = (args.context as string) || null;
+
         // Delete existing bookmark with same name if exists
-        db.run("DELETE FROM bookmarks WHERE name = ?", [args.name]);
-        db.run("INSERT INTO bookmarks (name, node_id) VALUES (?, ?)", [
-          args.name,
-          args.node_id,
-        ]);
+        db.run("DELETE FROM bookmarks WHERE name = ?", [name]);
+        db.run(
+          "INSERT INTO bookmarks (name, node_id, context) VALUES (?, ?, ?)",
+          [name, nodeId, context],
+        );
         saveDb();
         return {
           content: [
             {
               type: "text",
-              text: `Bookmark "${args.name}" saved with node ID: ${args.node_id}`,
+              text: `Bookmark "${name}" saved with node ID: ${nodeId}${context ? ` and context: "${context}"` : ""}`,
             },
           ],
         };
@@ -920,14 +956,15 @@ async function main() {
 
       case "list_bookmarks": {
         const results = db.exec(
-          "SELECT name, node_id, created_at FROM bookmarks ORDER BY name",
+          "SELECT name, node_id, context, created_at FROM bookmarks ORDER BY name",
         );
         const rows =
           results.length > 0
             ? results[0].values.map((row) => ({
                 name: row[0],
                 node_id: row[1],
-                created_at: row[2],
+                context: row[2] || null,
+                created_at: row[3],
               }))
             : [];
         return {
@@ -1042,9 +1079,6 @@ async function main() {
         }
       }
 
-      case "get_targets":
-        return workflowyRequest(apiKey, "/api/v1/targets", "GET");
-
       // Workflowy write operations
       case "create_node": {
         const body: Record<string, unknown> = {
@@ -1082,24 +1116,66 @@ async function main() {
       }
 
       case "update_node": {
+        const nodeId = args.node_id as string;
+        const completed = args.completed as boolean | undefined;
+
+        // Handle name/note updates
         const body: Record<string, unknown> = {};
         if (args.name !== undefined) body.name = args.name;
         if (args.note !== undefined) body.note = args.note;
-        const response = await workflowyRequest(
-          apiKey,
-          `/api/v1/nodes/${args.node_id}`,
-          "POST",
-          body,
-        );
+
+        let response: { content: Array<{ type: "text"; text: string }> } | null =
+          null;
+
+        // If there are name/note changes, update them first
+        if (Object.keys(body).length > 0) {
+          response = await workflowyRequest(
+            apiKey,
+            `/api/v1/nodes/${nodeId}`,
+            "POST",
+            body,
+          );
+        }
+
+        // Handle completed status change separately (uses different endpoint)
+        if (completed !== undefined) {
+          const endpoint = completed ? "complete" : "uncomplete";
+          const completedResponse = await workflowyRequest(
+            apiKey,
+            `/api/v1/nodes/${nodeId}/${endpoint}`,
+            "POST",
+          );
+          // If no previous response, use this one
+          if (!response) {
+            response = completedResponse;
+          }
+        }
+
+        // If no changes were requested, return an error
+        if (!response) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  { error: "No changes specified. Provide name, note, or completed." },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
 
         // Optimistically update cache
         try {
           const responseData = JSON.parse(response.content[0].text);
           if (responseData.ok) {
             updateNodeCache(db, "update", {
-              id: args.node_id as string,
+              id: nodeId,
               name: args.name as string | undefined,
               note: args.note as string | undefined,
+              completed,
             });
           }
         } catch {
@@ -1156,31 +1232,6 @@ async function main() {
         return response;
       }
 
-      case "set_completed": {
-        const completed = args.completed as boolean;
-        const endpoint = completed ? "complete" : "uncomplete";
-        const response = await workflowyRequest(
-          apiKey,
-          `/api/v1/nodes/${args.node_id}/${endpoint}`,
-          "POST",
-        );
-
-        // Optimistically update cache
-        try {
-          const responseData = JSON.parse(response.content[0].text);
-          if (responseData.ok) {
-            updateNodeCache(db, "update", {
-              id: args.node_id as string,
-              completed,
-            });
-          }
-        } catch {
-          // Ignore cache update errors
-        }
-
-        return response;
-      }
-
       // Cache and search operations
       case "search_nodes": {
         // Auto-sync if cache is empty or stale
@@ -1212,12 +1263,13 @@ async function main() {
           };
         }
 
-        // Build search query
+        // Use LIKE for text search (sql.js doesn't support FTS5)
         const searchPattern = `%${query.toUpperCase()}%`;
         const completedFilter = includeCompleted ? "" : "AND completed = 0";
 
+        // Query using LIKE pattern matching
         const results = db.exec(
-          `SELECT id, name, note, parent_id, completed
+          `SELECT id, name, note, parent_id, completed, children_count
            FROM nodes
            WHERE (UPPER(name) LIKE ? OR UPPER(note) LIKE ?)
            ${completedFilter}
@@ -1225,16 +1277,42 @@ async function main() {
           [searchPattern, searchPattern, limit],
         );
 
-        // Build results with paths
+        // Build results with paths and child previews
         const nodes =
           results[0]?.values.map((row) => {
-            const nodePath = buildNodePath(db, row[0] as string);
+            const nodeId = row[0] as string;
+            const childrenCount = (row[5] as number) || 0;
+            const nodePath = buildNodePath(db, nodeId);
+
+            // Get first 5 children as preview (ordered by priority)
+            let childrenPreview: Array<{
+              name: string;
+              children_count: number;
+            }> = [];
+            if (childrenCount > 0) {
+              const childResults = db.exec(
+                `SELECT name, children_count FROM nodes 
+                 WHERE parent_id = ? 
+                 ORDER BY priority 
+                 LIMIT 5`,
+                [nodeId],
+              );
+              if (childResults.length > 0 && childResults[0].values.length > 0) {
+                childrenPreview = childResults[0].values.map((childRow) => ({
+                  name: childRow[0] as string,
+                  children_count: (childRow[1] as number) || 0,
+                }));
+              }
+            }
+
             return {
-              id: row[0],
+              id: nodeId,
               name: row[1],
               note: row[2] || null,
               parent_id: row[3] || null,
               completed: row[4] === 1,
+              children_count: childrenCount,
+              children_preview: childrenPreview,
               path: nodePath,
               path_display: formatPathString(nodePath),
             };
@@ -1246,7 +1324,7 @@ async function main() {
         );
         const lastSync = (metaResult[0]?.values[0]?.[0] as string) ?? "never";
 
-        // Check if stale (>24 hours)
+        // Check if stale (>1 hour)
         let isStale = true;
         if (lastSync !== "never") {
           const lastSyncDate = new Date(lastSync);

@@ -66,6 +66,7 @@ fn get_server_path(app_handle: tauri::AppHandle) -> Result<String, String> {
 struct Bookmark {
     name: String,
     node_id: String,
+    context: Option<String>,
     created_at: Option<String>,
 }
 
@@ -84,7 +85,7 @@ fn get_bookmarks(app_handle: tauri::AppHandle) -> Result<Vec<Bookmark>, String> 
     let conn = Connection::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
 
     let mut stmt = conn
-        .prepare("SELECT name, node_id, created_at FROM bookmarks ORDER BY name")
+        .prepare("SELECT name, node_id, context, created_at FROM bookmarks ORDER BY name")
         .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
     let bookmarks = stmt
@@ -92,7 +93,8 @@ fn get_bookmarks(app_handle: tauri::AppHandle) -> Result<Vec<Bookmark>, String> 
             Ok(Bookmark {
                 name: row.get(0)?,
                 node_id: row.get(1)?,
-                created_at: row.get(2)?,
+                context: row.get(2)?,
+                created_at: row.get(3)?,
             })
         })
         .map_err(|e| format!("Failed to query bookmarks: {}", e))?
@@ -122,6 +124,33 @@ fn delete_bookmark(app_handle: tauri::AppHandle, name: String) -> Result<(), Str
     Ok(())
 }
 
+#[tauri::command]
+fn update_bookmark_context(
+    app_handle: tauri::AppHandle,
+    name: String,
+    context: Option<String>,
+) -> Result<(), String> {
+    let app_data = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let db_path = app_data.join("bookmarks.db");
+
+    if !db_path.exists() {
+        return Err("Database not found".to_string());
+    }
+
+    let conn = Connection::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
+
+    conn.execute(
+        "UPDATE bookmarks SET context = ? WHERE name = ?",
+        rusqlite::params![context, name],
+    )
+    .map_err(|e| format!("Failed to update bookmark: {}", e))?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -133,7 +162,8 @@ pub fn run() {
             validate_api_key,
             get_server_path,
             get_bookmarks,
-            delete_bookmark
+            delete_bookmark,
+            update_bookmark_context
         ])
         .setup(|app| {
             // Copy MCP server from bundle to data directory
