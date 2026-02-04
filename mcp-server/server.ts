@@ -765,12 +765,34 @@ const defaultTools = [
   // Workflowy write tools
   {
     name: "create_node",
-    description:
-      "Create a new node (bullet point) in Workflowy. The node will be added as a child of the specified parent.",
+    description: `Create a new node in Workflowy. SUPPORTS MARKDOWN for creating multiple nested nodes in ONE call.
+
+**MULTILINE NODES**: Use \\n\\n (double newline) to create siblings. First line = parent, subsequent lines = children.
+**MARKDOWN HEADERS**: # h1, ## h2, ### h3 create header nodes
+**BULLETS**: - item creates bullet points
+**TODOS**: - [ ] task creates unchecked todo, - [x] task creates checked todo
+**FORMATTING**: **bold**, *italic*, \`code\`, [link](url)
+
+EXAMPLE - Create a full structure in ONE call:
+name: "## Topics Discussed\\n\\n- First topic\\n\\n- Second topic\\n\\n## Decisions\\n\\n- Decision one\\n\\n- Decision two"
+
+This creates:
+  Topics Discussed (h2)
+    First topic
+    Second topic
+  Decisions (h2)
+    Decision one
+    Decision two
+
+PREFER multiline markdown over multiple create_node calls for efficiency.`,
     inputSchema: {
       type: "object",
       properties: {
-        name: { type: "string", description: "The text content of the node" },
+        name: {
+          type: "string",
+          description:
+            "The text content. Use \\n\\n for siblings, markdown for structure (# h1, ## h2, - bullet, - [ ] todo, **bold**)",
+        },
         parent_id: {
           type: "string",
           description:
@@ -779,6 +801,11 @@ const defaultTools = [
         note: {
           type: "string",
           description: "Optional note/description for the node",
+        },
+        position: {
+          type: "string",
+          enum: ["top", "bottom"],
+          description: "Where to place the node: 'top' (default) or 'bottom'",
         },
       },
       required: ["name", "parent_id"],
@@ -935,14 +962,27 @@ The context field is for YOU to write notes about:
 2. If yes: get_node_tree with that node_id → Present output as-is
 3. If no: search_nodes("tasks") → Use children_preview to pick the right result → Save bookmark for next time
 
-**Creating new content:**
+**Creating new content (IMPORTANT - use multiline markdown):**
 1. list_bookmarks to find the right parent location
-2. create_node with that node_id as parent_id
+2. Use ONE create_node call with multiline markdown to create entire structures:
+
+\`\`\`
+create_node(
+  parent_id: "node-uuid",
+  name: "## Section Title\\n\\n- First item\\n\\n- Second item\\n\\n## Another Section\\n\\n- More items"
+)
+\`\`\`
+
+This creates multiple nodes in ONE API call:
+- Use \\n\\n (double newline) between siblings
+- Use ## for headers, - for bullets, - [ ] for todos
+- NEVER make multiple create_node calls when you can use multiline markdown instead
 
 **Marking tasks complete:**
 - update_node with completed=true
 
 ## Tips
+- **EFFICIENCY**: Use multiline markdown in create_node to add multiple items in one call
 - get_node_tree returns compact text format - show it to the user without modification
 - Search results include children_preview so you can evaluate relevance in one call
 - Save bookmarks with detailed context to speed up future sessions
@@ -1198,6 +1238,7 @@ async function main() {
           parent_id: args.parent_id,
         };
         if (args.note) body.note = args.note;
+        if (args.position) body.position = args.position;
         const response = await workflowyRequest(
           apiKey,
           "/api/v1/nodes",
