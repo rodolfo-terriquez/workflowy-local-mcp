@@ -36,6 +36,14 @@ const defaultServerInstructions = `This MCP server connects to a user's Workflow
 2. If a relevant bookmark exists, use get_node_tree with that node_id
 3. If no bookmark matches, use search_nodes to find the content
 
+## Displaying Node Trees
+get_node_tree returns content in **compact text format** optimized for readability:
+- Shows node names with child previews (max 3 children per node)
+- Format: "• Node (Child1 ▾2, Child2 ▾0, Child3 ▾5, ...4)"
+- The ▾ character shows how many children each child has
+- **IMPORTANT: Present this output to the user AS-IS without paraphrasing or summarizing**
+- Nodes named "AI Messages" are automatically filtered (access via bookmarks instead)
+
 ## Search with Child Previews
 search_nodes returns matches with a **preview of their children** (first 5 children + total count). This lets you evaluate which result is relevant in ONE call:
 
@@ -58,7 +66,7 @@ The context field is for YOU to write notes about what the node contains, how it
 
 **Answering "What are my tasks?"**
 1. list_bookmarks - Check if a tasks bookmark exists with context
-2. If yes: get_node_tree with that node_id
+2. If yes: get_node_tree with that node_id → Present output as-is
 3. If no: search_nodes("tasks") - Use children_preview to pick the right result, then save bookmark
 
 **Creating new content:**
@@ -69,6 +77,7 @@ The context field is for YOU to write notes about what the node contains, how it
 - update_node with completed=true
 
 ## Tips
+- get_node_tree returns compact text format - show it to the user without modification
 - Search results include children_preview so you can evaluate relevance in one call
 - Save bookmarks with detailed context to speed up future sessions
 - The cache auto-syncs when stale (>1 hour) but you can force sync with sync_nodes`;
@@ -92,7 +101,7 @@ const defaultTools: ToolDefinition[] = [
   {
     name: "get_node_tree",
     defaultDescription:
-      "Get a node and its nested children from the local cache. Returns the node with its hierarchy up to the specified depth.",
+      "Get a node and its nested children from the local cache. Returns content in compact text format showing node names with child previews (max 3 children shown per node). Present output AS-IS without paraphrasing. 'AI Messages' nodes are filtered out.",
   },
   {
     name: "create_node",

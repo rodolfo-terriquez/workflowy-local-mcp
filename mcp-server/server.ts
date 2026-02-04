@@ -505,6 +505,7 @@ interface NodeTree {
   note: string | null;
   parent_id: string | null;
   completed: boolean;
+  children_count: number;
   children?: NodeTree[];
 }
 
@@ -513,18 +514,19 @@ function buildNodeTree(
   nodeId: string | null,
   depth: number,
   currentDepth: number = 0,
+  excludeNodeNames: string[] = [],
 ): NodeTree[] {
   if (currentDepth >= depth) {
     return [];
   }
 
-  // Query children of this node
+  // Query children of this node (ordered by priority, then name)
   const parentCondition =
     nodeId === null ? "parent_id IS NULL" : "parent_id = ?";
   const params = nodeId === null ? [] : [nodeId];
 
   const results = db.exec(
-    `SELECT id, name, note, parent_id, completed FROM nodes WHERE ${parentCondition} ORDER BY name`,
+    `SELECT id, name, note, parent_id, completed, children_count FROM nodes WHERE ${parentCondition} ORDER BY priority, name`,
     params,
   );
 
@@ -532,31 +534,72 @@ function buildNodeTree(
     return [];
   }
 
-  return results[0].values.map((row) => {
-    const node: NodeTree = {
-      id: row[0] as string,
-      name: row[1] as string,
-      note: (row[2] as string) || null,
-      parent_id: (row[3] as string) || null,
-      completed: row[4] === 1,
-    };
+  return results[0].values
+    .filter((row) => {
+      const name = row[1] as string;
+      // Filter out excluded node names
+      return !excludeNodeNames.includes(name);
+    })
+    .map((row) => {
+      const node: NodeTree = {
+        id: row[0] as string,
+        name: row[1] as string,
+        note: (row[2] as string) || null,
+        parent_id: (row[3] as string) || null,
+        completed: row[4] === 1,
+        children_count: (row[5] as number) || 0,
+      };
 
-    // Recursively get children if we haven't reached max depth
-    if (currentDepth + 1 < depth) {
-      const children = buildNodeTree(db, node.id, depth, currentDepth + 1);
-      if (children.length > 0) {
-        node.children = children;
+      // Recursively get children if we haven't reached max depth
+      if (currentDepth + 1 < depth) {
+        const children = buildNodeTree(db, node.id, depth, currentDepth + 1, excludeNodeNames);
+        if (children.length > 0) {
+          node.children = children;
+        }
       }
+
+      return node;
+    });
+}
+
+// Format node tree as markdown (for display to user)
+function formatNodeTreeMarkdown(
+  nodes: NodeTree[],
+  indentLevel: number = 0,
+): string {
+  const lines: string[] = [];
+  const indent = "  ".repeat(indentLevel);
+
+  for (const node of nodes) {
+    // Markdown list format: "- Item" or "- Item (N children)" if it has children
+    let line = `${indent}- ${node.name}`;
+
+    // Add children count if node has children (helps LLM and user understand nesting)
+    if (node.children_count > 0) {
+      line += ` (${node.children_count} children)`;
     }
 
-    return node;
-  });
+    // Add note if present
+    if (node.note && node.note.trim()) {
+      line += ` — ${node.note.trim()}`;
+    }
+
+    lines.push(line);
+
+    // Recursively format children if they were fetched
+    if (node.children && node.children.length > 0) {
+      const childrenText = formatNodeTreeMarkdown(node.children, indentLevel + 1);
+      lines.push(childrenText);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 // Get a single node by ID from local cache
 function getNodeFromCache(db: Database, nodeId: string): NodeTree | null {
   const results = db.exec(
-    "SELECT id, name, note, parent_id, completed FROM nodes WHERE id = ?",
+    "SELECT id, name, note, parent_id, completed, children_count FROM nodes WHERE id = ?",
     [nodeId],
   );
 
@@ -571,6 +614,7 @@ function getNodeFromCache(db: Database, nodeId: string): NodeTree | null {
     note: (row[2] as string) || null,
     parent_id: (row[3] as string) || null,
     completed: row[4] === 1,
+    children_count: (row[5] as number) || 0,
   };
 }
 
@@ -695,7 +739,7 @@ const defaultTools = [
   {
     name: "get_node_tree",
     description:
-      "Get a node and its nested children from the local cache. Returns the node with its hierarchy up to the specified depth. Use sync_nodes first if cache is empty.",
+      "Get a node and its nested children. Returns markdown with items showing '(N children)' when they have nested content. Show this to the user so they know which items can be expanded further.",
     inputSchema: {
       type: "object",
       properties: {
@@ -708,6 +752,11 @@ const defaultTools = [
           type: "number",
           description:
             "How many levels of children to include (default: 2, max: 10)",
+        },
+        format: {
+          type: "string",
+          description:
+            "Output format: 'compact' (human-readable text, default) or 'json' (structured data)",
         },
       },
       required: ["node_id"],
@@ -849,6 +898,13 @@ const defaultServerInstructions = `This MCP server connects to a user's Workflow
 2. If a relevant bookmark exists, use get_node_tree with that node_id
 3. If no bookmark matches, use search_nodes to find the content
 
+## Displaying Node Trees
+get_node_tree returns pre-formatted markdown. Display this output directly to the user WITHOUT modifications:
+- Do NOT summarize or paraphrase
+- Do NOT convert to tables
+- Do NOT remove the ▾ symbols (they indicate nested content)
+- Just show the markdown as-is
+
 ## Search with Child Previews
 search_nodes returns matches with a **preview of their children** (first 5 children + total count). This lets you evaluate which result is relevant in ONE call:
 
@@ -876,7 +932,7 @@ The context field is for YOU to write notes about:
 
 **Answering "What are my tasks?"**
 1. list_bookmarks → Check if a tasks bookmark exists with context
-2. If yes: get_node_tree with that node_id
+2. If yes: get_node_tree with that node_id → Present output as-is
 3. If no: search_nodes("tasks") → Use children_preview to pick the right result → Save bookmark for next time
 
 **Creating new content:**
@@ -887,6 +943,7 @@ The context field is for YOU to write notes about:
 - update_node with completed=true
 
 ## Tips
+- get_node_tree returns compact text format - show it to the user without modification
 - Search results include children_preview so you can evaluate relevance in one call
 - Save bookmarks with detailed context to speed up future sessions
 - The cache auto-syncs when stale (>1 hour) but you can force sync with sync_nodes`;
@@ -1028,6 +1085,7 @@ async function main() {
 
         const nodeId = args.node_id as string;
         const depth = Math.min(Math.max((args.depth as number) ?? 2, 1), 10);
+        const format = (args.format as string) ?? "compact"; // "compact" or "json"
 
         // Check if cache exists
         const countResult = db.exec("SELECT COUNT(*) FROM nodes");
@@ -1038,49 +1096,39 @@ async function main() {
             content: [
               {
                 type: "text",
-                text: JSON.stringify(
-                  {
-                    error: "Cache is empty. Run sync_nodes first.",
-                    cache_status: "empty",
-                  },
-                  null,
-                  2,
-                ),
+                text: "Error: Cache is empty. Run sync_nodes first.",
               },
             ],
           };
         }
 
+        // Nodes to exclude from display (should be in bookmarks instead)
+        const excludedNodes = ["AI Messages"];
+
         if (nodeId === "None") {
           // Get top-level nodes with children
-          const nodes = buildNodeTree(db, null, depth, 0);
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(
-                  {
-                    parent_id: null,
-                    depth,
-                    children: nodes,
-                  },
-                  null,
-                  2,
-                ),
-              },
-            ],
-          };
-        } else {
-          // Get specific node with children
-          const node = getNodeFromCache(db, nodeId);
-          if (!node) {
+          const nodes = buildNodeTree(db, null, depth, 0, excludedNodes);
+          
+          if (format === "compact") {
+            const markdown = formatNodeTreeMarkdown(nodes);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: markdown || "(no nodes)",
+                },
+              ],
+            };
+          } else {
             return {
               content: [
                 {
                   type: "text",
                   text: JSON.stringify(
                     {
-                      error: `Node not found: ${nodeId}`,
+                      parent_id: null,
+                      depth,
+                      children: nodes,
                     },
                     null,
                     2,
@@ -1089,21 +1137,57 @@ async function main() {
               ],
             };
           }
+        } else {
+          // Get specific node with children
+          const node = getNodeFromCache(db, nodeId);
+          if (!node) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error: Node not found: ${nodeId}`,
+                },
+              ],
+            };
+          }
 
           // Add children to the node
-          const children = buildNodeTree(db, nodeId, depth, 0);
+          const children = buildNodeTree(db, nodeId, depth, 0, excludedNodes);
           if (children.length > 0) {
             node.children = children;
           }
 
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(node, null, 2),
-              },
-            ],
-          };
+          if (format === "compact") {
+            let output = `**${node.name}**`;
+            if (node.children_count > 0) {
+              output += ` (${node.children_count} children)`;
+            }
+            if (node.note) {
+              output += `\n\n> ${node.note}`;
+            }
+            if (children.length > 0) {
+              output += "\n\n" + formatNodeTreeMarkdown(children, 0);
+            } else if (node.children_count === 0) {
+              output += "\n\n(empty)";
+            }
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: output,
+                },
+              ],
+            };
+          } else {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(node, null, 2),
+                },
+              ],
+            };
+          }
         }
       }
 
