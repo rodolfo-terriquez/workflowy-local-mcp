@@ -1,14 +1,16 @@
 # Workflowy Local MCP - Implementation Status
 
-*Last updated: February 3, 2026*
+*Last updated: February 4, 2026*
 
-## Status: ✅ FULLY IMPLEMENTED
+## Status: FULLY IMPLEMENTED
 
 All planned enhancements have been successfully implemented and are production-ready. The system features:
 - 10 streamlined MCP tools with comprehensive capabilities
 - Search with child previews for intelligent result selection
 - Bookmarks with LLM-written context notes
 - Auto-sync with staleness detection and rate limiting
+- **Selective sync-on-access** for always-fresh data
+- **AI Instructions system** for user-customizable LLM behavior
 - Full desktop UI for configuration and management
 - Automatic database migrations for seamless upgrades
 
@@ -31,6 +33,8 @@ Workflowy's data structure is fundamentally different from what LLMs expect. Ins
 
 **Bookmarks are LLM memory.** Once the LLM finds something important, it can bookmark it with context notes for future sessions. Over time, this builds up a map of the user's structure.
 
+**User instructions live in Workflowy.** Instead of config files, users can create an "AI Instructions" node in their Workflowy to customize LLM behavior. The LLM reads these at the start of each session.
+
 ## Current Implementation
 
 **Project repository:** https://github.com/rodolfo-terriquez/workflowy-local-mcp
@@ -42,64 +46,157 @@ Workflowy's data structure is fundamentally different from what LLMs expect. Ins
 - **Current tools**: 10 streamlined tools for CRUD, search, bookmarks, and sync
 
 **Implemented features:**
-- ✅ Full export sync from Workflowy API (respects 1 req/min rate limit)
-- ✅ SQLite caching with automatic migrations
-- ✅ Search with child previews (first 5 children + counts)
-- ✅ Bookmark system with context notes
-- ✅ Auto-sync on startup (if cache stale >1 hour)
-- ✅ Optimistic cache updates for write operations
-- ✅ Rate limiting with cooldown tracking
-- ✅ Background sync with status tracking
-- ✅ Full UI for managing bookmarks and cache
+- Full export sync from Workflowy API (respects 1 req/min rate limit)
+- SQLite caching with automatic migrations
+- Search with child previews (first 5 children + counts)
+- Bookmark system with context notes
+- Auto-sync on startup and conversation start (if cache stale >1 hour)
+- **Selective sync-on-access** using `/api/v1/nodes` endpoint (no rate limit)
+- Optimistic cache updates for write operations
+- Rate limiting with cooldown tracking
+- Background sync with status tracking
+- **AI Instructions system** for user-customizable behavior
+- Full UI for managing bookmarks and cache
+
+---
 
 ## Key Features
 
-### Feature 1: Search Results with Child Previews ✅ IMPLEMENTED
+### Feature 1: AI Instructions System IMPLEMENTED
+
+**The problem:** LLMs don't automatically know how to interact with a user's Workflowy. Different users have different organizational systems, preferences, and conventions. Without guidance, the LLM might create duplicates (e.g., new date nodes when calendar dates already exist) or format things incorrectly.
+
+**The solution:** Users create an "AI Instructions" node in their Workflowy with custom preferences. The LLM reads these automatically at the start of each session.
+
+**How it works:**
+
+1. **User creates a node** called "AI Instructions" anywhere in their Workflowy
+2. **User adds child nodes** with preferences like:
+   - "Always add new tasks to my #inbox"
+   - "Use checkboxes [ ] for tasks, not bullets"
+   - "My calendar is under 'Daily Notes > 2026'"
+   - "Never modify nodes under 'Archive'"
+3. **LLM saves it as bookmark** named `ai_instructions` (reserved name)
+4. **Every session**, LLM calls `list_bookmarks` first, which returns:
+   - `_instructions`: Tells LLM to read user_instructions
+   - `user_instructions`: The actual custom instructions
+   - `action_required`: If no bookmark exists, tells LLM to search for it
+
+**Implementation details:**
+
+The `list_bookmarks` tool is configured to be called first every session:
+
+```typescript
+{
+  name: "list_bookmarks",
+  description: `**START EVERY CONVERSATION BY CALLING THIS TOOL.** This returns saved Workflowy locations AND the user's custom AI instructions.
+
+The response contains:
+- bookmarks: Saved node locations with context notes
+- user_instructions: The user's custom preferences (if they have an 'ai_instructions' bookmark)
+
+IMPORTANT: If user_instructions exists in the response, follow those preferences for the entire conversation.`
+}
+```
+
+The response always includes guidance:
+
+```json
+{
+  "_instructions": "READ THIS FIRST: Check user_instructions below for the user's custom AI preferences. Follow them for this entire conversation.",
+  "bookmarks": [...],
+  "user_instructions": "- Always add tasks to inbox\n- Use checkboxes for todos",
+  // OR if not set up yet:
+  "action_required": "No 'ai_instructions' bookmark found. Search for a node named 'AI Instructions' in Workflowy using search_nodes. If found, read it with get_node_tree and save it as bookmark 'ai_instructions' for future sessions."
+}
+```
+
+**Key implementation locations:**
+- Reserved bookmark name constant: `mcp-server/server.ts` line 191
+- `getAIInstructions()` function: `mcp-server/server.ts` lines 828-878
+- `list_bookmarks` response building: `mcp-server/server.ts` lines 1421-1466
+- Tool description: `mcp-server/server.ts` lines 953-965
+
+**Why this approach works:**
+
+1. **Tool descriptions are always read** - Unlike server instructions or prompts, LLMs always see tool descriptions
+2. **`list_bookmarks` is naturally called first** - The description makes this explicit
+3. **Response contains clear guidance** - The `_instructions` field is impossible to miss
+4. **Graceful degradation** - If no instructions exist, `action_required` tells the LLM what to do
+
+**Lessons learned (important for avoiding regressions):**
+
+- MCP `server.instructions` field is NOT reliably read by all clients
+- MCP prompts (like `server_instructions`) are NOT automatically fetched
+- The ONLY reliable way to communicate with LLMs is through tool descriptions and tool responses
+- Tool descriptions should be explicit: "START EVERY CONVERSATION BY CALLING THIS TOOL"
+- Tool responses should include guidance fields that the LLM can't miss
+
+---
+
+### Feature 2: Selective Sync-on-Access IMPLEMENTED
+
+**The problem:** The full export endpoint (`/nodes-export`) has a 1 request/minute rate limit, but users expect fresh data when they access nodes. Waiting for full syncs means stale data.
+
+**The solution:** Use the `/api/v1/nodes?parent_id=X` endpoint (no rate limit) to sync specific nodes when they're accessed.
+
+**Implementation:**
+
+Two new functions handle selective sync:
+
+```typescript
+// Sync a single node
+async function syncSingleNode(apiKey, db, nodeId)
+
+// Sync children of a node (1 level only - NOT recursive)
+async function syncNodeChildren(apiKey, db, parentId)
+```
+
+**When sync happens:**
+
+| Tool | Sync Action | Blocking? |
+|------|-------------|-----------|
+| `list_bookmarks` | Sync `ai_instructions` bookmark's children | Yes (awaited) |
+| `list_bookmarks` | Sync other bookmarked nodes' children | No (background) |
+| `get_node_tree` | Sync requested node's children | Yes (awaited) |
+| `create_node` | Sync parent's children after creation | No (background) |
+| `update_node` | Sync the updated node | No (background) |
+| `delete_node` | Sync parent's children after deletion | No (background) |
+| `move_node` | Sync both old and new parent's children | No (background) |
+
+**Key design decisions:**
+
+1. **1 level only** - Never recursive to avoid thousands of API calls
+2. **Awaited for reads** - `get_node_tree` and `ai_instructions` wait for sync to complete
+3. **Background for writes** - Write operations fire-and-forget so they don't block
+4. **No rate limit** - These endpoints aren't rate-limited like `/nodes-export`
+
+**Implementation locations:**
+- `syncSingleNode()`: `mcp-server/server.ts` lines 504-570
+- `syncNodeChildren()`: `mcp-server/server.ts` lines 573-686
+- `deleteNodeFromCache()`: `mcp-server/server.ts` lines 689-704
+- Integration in tool handlers: throughout the switch statement
+
+---
+
+### Feature 3: Search Results with Child Previews IMPLEMENTED
 
 **The solution:** Search results include a preview of children so the LLM can evaluate relevance in one call.
 
-**Implementation location:** `mcp-server/server.ts` lines 1264-1383
+**Example response:**
 
-**Example workflow - User asks "What are my tasks for today?"**
-
-```
-LLM calls: search("tasks today")
-
-Results returned:
-─────────────────────────────────────────────────────────
-1. "Today's Tasks"
-   Path: Home › Daily › Today's Tasks
-   Children: 5 of 12 shown
-     • [ ] Fix header bug (0 children)
-     • [ ] Review PR #123 (2 children)
-     • [ ] Email Sarah (0 children)
-     • [ ] Update docs (5 children)
-     • [ ] Deploy staging (0 children)
-   ...7 more
-─────────────────────────────────────────────────────────
-2. "Tasks"
-   Path: Home › Archive › Old Project › Tasks
-   Children: none
-─────────────────────────────────────────────────────────
-```
-
-The LLM immediately sees: Result #1 has actual tasks with checkbox formatting. Result #2 is empty and buried in Archive. **One tool call, obvious next step.**
-
-**Data format:**
 ```json
 {
   "node_id": "abc-123",
   "name": "Today's Tasks",
-  "path": "Home › Daily › Today's Tasks",
+  "path": "Home > Daily > Today's Tasks",
   "note": null,
   "completed": false,
   "children_count": 12,
   "children_preview": [
     { "name": "[ ] Fix header bug", "children_count": 0 },
     { "name": "[ ] Review PR #123", "children_count": 2 },
-    { "name": "[ ] Email Sarah", "children_count": 0 },
-    { "name": "[ ] Update docs", "children_count": 5 },
-    { "name": "[ ] Deploy staging", "children_count": 0 }
+    { "name": "[ ] Email Sarah", "children_count": 0 }
   ]
 }
 ```
@@ -109,16 +206,14 @@ The LLM immediately sees: Result #1 has actual tasks with checkbox formatting. R
 - `children_preview` (first 5) shows what kind of content is inside
 - Each preview item's `children_count` indicates depth/complexity
 - Children are ordered by `priority` field from Workflowy API
-- LLM can make informed decisions without additional reads
 
-### Feature 2: Bookmark Context Field ✅ IMPLEMENTED
+**Default limit:** 5 results (configurable up to 100)
+
+---
+
+### Feature 4: Bookmark Context Field IMPLEMENTED
 
 **The solution:** Bookmarks include a `context` field where the LLM writes notes for its future self.
-
-**Implementation locations:**
-- MCP server: `mcp-server/server.ts` lines 87-104 (schema), 653-676 (save), 985-1001 (list)
-- Rust backend: `src-tauri/src/lib.rs` lines 65-177
-- React UI: `src/App.tsx` lines 964-1066
 
 **Bookmark format:**
 ```json
@@ -134,174 +229,125 @@ The LLM immediately sees: Result #1 has actual tasks with checkbox formatting. R
 - LLM builds up knowledge of user's structure over time
 - Future sessions start with context instead of cold-searching
 - Context is LLM-written, for LLMs - optimized for their understanding
-- Context is editable via both MCP tools and the desktop UI
 
-### Typical Workflows
+---
 
-```
-User: "What are my tasks for today?"
+### Feature 5: Calendar/Date Node Handling IMPLEMENTED
 
-┌─────────────────────────────────────────────────────────┐
-│ Step 1: list_bookmarks()                                │
-│   → Returns bookmarks with context                      │
-│   → LLM sees "Daily Tasks" bookmark with context        │
-│   → Skips search, goes directly to known location       │
-├─────────────────────────────────────────────────────────┤
-│ Step 2: read(node_id="abc-123", depth=2)                │
-│   → Gets the node and 2 levels of children              │
-│   → Returns full task list                              │
-├─────────────────────────────────────────────────────────┤
-│ Step 3: Answer user's question                          │
-│   → "You have 5 tasks for today: ..."                   │
-└─────────────────────────────────────────────────────────┘
+**The problem:** Workflowy's calendar system auto-creates date nodes with varying formats ("Jan 15, 2025", "Today - Jan 15", etc.). LLMs were creating duplicate date nodes instead of adding to existing ones.
 
-Total: 2 tool calls (because bookmark existed)
-```
-
-**First time (no bookmark):**
+**The solution:** Server instructions explicitly warn about this:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ Step 1: list_bookmarks()                                │
-│   → Empty or no relevant bookmark                       │
-├─────────────────────────────────────────────────────────┤
-│ Step 2: search("tasks today")                           │
-│   → Returns matches with child previews                 │
-│   → LLM picks best match based on preview content       │
-├─────────────────────────────────────────────────────────┤
-│ Step 3: read(node_id, depth=2)                          │
-│   → Gets full content                                   │
-├─────────────────────────────────────────────────────────┤
-│ Step 4: add_bookmark(node_id, "Daily Tasks", context)   │
-│   → Saves for next time                                 │
-├─────────────────────────────────────────────────────────┤
-│ Step 5: Answer user's question                          │
-└─────────────────────────────────────────────────────────┘
+## Calendar & Date Nodes
+Workflowy has a calendar system that auto-creates date nodes (e.g., "Jan 15, 2025", "Today - Jan 15", "Tomorrow - Jan 16"). These date nodes may have prefixes like "Today", "Yesterday", "Tomorrow" depending on user preferences.
 
-Total: 4 tool calls (first time), 2 calls thereafter
+**CRITICAL: Always search before creating date-related content.**
+- Before adding items to a date, ALWAYS search for that date first
+- Date nodes may appear with different text - they are the SAME node
+- If a date node exists, use update_node or create_node with that node as parent
+- When searching for dates, try multiple formats
 ```
+
+---
 
 ## Current Tool Set
 
-| Tool | Purpose | Implementation |
-|------|---------|----------------|
-| `search_nodes` | LIKE-based search → matches with child previews (first 5 + counts) | lines 1264-1383 |
-| `get_node_tree` | Get a node + children to depth N (max 10) | lines 1025-1108 |
-| `list_bookmarks` | Return all bookmarks with context notes | lines 985-1001 |
-| `save_bookmark` | Save node with label + LLM-written context | lines 962-983 |
-| `delete_bookmark` | Delete a bookmark by name | lines 1003-1022 |
-| `create_node` | Create new node (API passthrough + optimistic cache update) | lines 1111-1144 |
-| `update_node` | Edit node name/note/completed status (handles complete/uncomplete) | lines 1146-1214 |
-| `move_node` | Move node to new parent (API passthrough + cache update) | lines 1236-1261 |
-| `delete_node` | Delete node and descendants (API + recursive cache deletion) | lines 1216-1234 |
-| `sync_nodes` | Force refresh cache from Workflowy API | lines 1385-1395 |
+| Tool | Purpose |
+|------|---------|
+| `list_bookmarks` | **START HERE** - Returns bookmarks + user's AI instructions |
+| `search_nodes` | LIKE-based search with child previews (first 5 + counts) |
+| `get_node_tree` | Get a node + children to depth N (max 10) |
+| `save_bookmark` | Save node with label + LLM-written context |
+| `delete_bookmark` | Delete a bookmark by name |
+| `create_node` | Create new node (supports multiline markdown) |
+| `update_node` | Edit node name/note/completed status |
+| `move_node` | Move node to new parent |
+| `delete_node` | Delete node and descendants |
+| `sync_nodes` | Force refresh cache from Workflowy API |
 
-**10 tools total.** Consolidated from the initial design by merging completion status into `update_node`.
+**10 tools total.**
 
-## Additional Features Implemented
-
-Beyond the core enhancements, the implementation includes:
-
-### Priority-Based Child Ordering
-Children are ordered by Workflowy's `priority` field, preserving the user's intended ordering. This ensures child previews show items in the same order as they appear in Workflowy.
-
-### Comprehensive UI
-The Tauri desktop app provides:
-- **API Key Management** - Validation and secure storage
-- **Bookmarks Tab** - View, edit context, and delete bookmarks
-- **Cache Status** - View sync status, node count, and freshness
-- **Manual Sync** - Force sync with rate limit countdown
-- **Tool Customization** - Edit server instructions and tool descriptions
-- **Setup Instructions** - Copy-paste config for Claude Code, Claude Desktop, and Cursor
-- **Activity Logs** - Real-time logging of operations
-
-### Robust Error Handling
-- Transaction rollback on sync failures
-- Graceful handling of missing nodes
-- Prevention of infinite loops in tree traversal
-- Validation of API keys before operations
-
-### Path Building
-Search results include both a full path array and a formatted display path with smart truncation for deeply nested nodes (e.g., "Root > ... > Parent > Node").
+---
 
 ## Workflowy API Reference
 
 **Endpoint:** `https://beta.workflowy.com/api-reference/`
 
 **Key endpoints:**
-- `GET /api/v1/nodes-export` - Export ALL nodes (has `parent_id` field). **Rate limit: 1/minute**
-- `GET /api/v1/nodes/:id` - Get single node
+- `GET /api/v1/nodes-export` - Export ALL nodes. **Rate limit: 1/minute**
+- `GET /api/v1/nodes?parent_id=X` - List children of a node. **No rate limit**
+- `GET /api/v1/nodes/:id` - Get single node. **No rate limit**
 - `POST /api/v1/nodes` - Create node
 - `POST /api/v1/nodes/:id` - Update node
 - `DELETE /api/v1/nodes/:id` - Delete node
 - `POST /api/v1/nodes/:id/move` - Move node
-
-**Node object fields:**
-- `id` - UUID
-- `name` - Main text (supports markdown formatting)
-- `note` - Additional content
-- `parent_id` - Reference to parent
-- `priority` - Sort order among siblings
-- `createdAt`, `modifiedAt` - Unix timestamps
-- `completedAt` - Null if incomplete
-- `layoutMode` - Display style (bullets, todo, h1, h2, h3, code-block, quote-block)
+- `POST /api/v1/nodes/:id/complete` - Mark complete
+- `POST /api/v1/nodes/:id/uncomplete` - Mark incomplete
 
 **Auth:** Bearer token in Authorization header
 
-## Implementation Details
+---
 
-### SQLite Schema
+## Auto-Sync Behavior
 
-**Bookmarks table:**
-```sql
-CREATE TABLE IF NOT EXISTS bookmarks (
-  name TEXT PRIMARY KEY,
-  node_id TEXT NOT NULL,
-  context TEXT,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP
-)
+| Trigger | What Syncs | Rate Limited? |
+|---------|------------|---------------|
+| Server startup | `ai_instructions` bookmark children | No |
+| Conversation start | Full sync if cache >1 hour old | Yes (1/min) |
+| `list_bookmarks` call | All bookmarked nodes' children | No |
+| `get_node_tree` call | Requested node's children | No |
+| After write operations | Affected nodes' children | No |
+
+---
+
+## Implementation Lessons (Regression Prevention)
+
+### How to Reliably Communicate Instructions to LLMs
+
+**What DOESN'T work reliably:**
+- MCP `server.instructions` field - Not all clients read it
+- MCP prompts - Clients don't automatically fetch them
+- Assuming LLMs will read documentation
+
+**What DOES work:**
+1. **Tool descriptions** - Always read by LLMs before calling tools
+2. **Tool response fields** - LLMs read the data they receive
+3. **Explicit instructions** in both places
+
+**Pattern for critical instructions:**
+
+```typescript
+// In tool description:
+description: `**START EVERY CONVERSATION BY CALLING THIS TOOL.** ...`
+
+// In tool response:
+return {
+  _instructions: "READ THIS FIRST: ...",
+  data: ...,
+  action_required: "If X is missing, do Y"
+}
 ```
 
-**Nodes cache table:**
-```sql
-CREATE TABLE IF NOT EXISTS nodes (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL DEFAULT '',
-  note TEXT DEFAULT '',
-  parent_id TEXT,
-  completed INTEGER DEFAULT 0,
-  children_count INTEGER DEFAULT 0,
-  priority INTEGER DEFAULT 0,
-  created_at TEXT,
-  updated_at TEXT
-)
-```
+### Sync-on-Access Pattern
 
-**Indexes for performance:**
-- `idx_nodes_parent_id` - For hierarchical queries
-- `idx_nodes_completed` - For filtering completed items
-- `idx_nodes_priority` - For ordering children by priority
-- `idx_nodes_name` - For LIKE-based search
-- `idx_nodes_note` - For note search
+**Problem:** Full syncs are rate-limited and slow
+**Solution:** Use selective sync endpoints for specific nodes
 
-### Automatic Migrations
+**Key rules:**
+1. **Never recursive** - Only sync 1 level of children
+2. **Await for reads** - Ensure fresh data before returning
+3. **Background for writes** - Don't block the response
+4. **Handle missing nodes** - API returns 404 for deleted nodes
 
-Both TypeScript (`server.ts` lines 98-157) and Rust (`lib.rs` lines 73-93) backends include migration logic to add missing columns to existing databases, ensuring seamless upgrades.
+### Reserved Bookmark Names
 
-### Search Implementation
+The `ai_instructions` bookmark name is reserved for the AI Instructions feature. The system:
+1. Looks for this bookmark specifically
+2. Syncs its children before reading
+3. Includes its content in `list_bookmarks` response
 
-Since sql.js doesn't support FTS5, search uses `UPPER(name) LIKE ?` and `UPPER(note) LIKE ?` with indexes for reasonable performance. The pattern matching approach works well for typical use cases (few thousand to hundreds of thousands of nodes).
-
-### Auto-Sync Behavior
-
-- **On startup:** Background sync if cache is >1 hour old (lines 1407-1447)
-- **On read operations:** Auto-check freshness and sync if needed (lines 459-499)
-- **Rate limiting:** Respects Workflowy's 1 req/min limit with cooldown tracking
-- **In-progress check:** Prevents concurrent sync operations
-
-### Optimistic Cache Updates
-
-Write operations (create, update, move, delete) immediately update the local cache after successful API calls, keeping the cache in sync without requiring a full refresh.
+---
 
 ## Development Setup
 
@@ -331,24 +377,28 @@ Write operations (create, update, move, delete) immediately update the local cac
    npm run tauri dev
    ```
 
+---
+
 ## Key Files
 
-| File | Purpose | Lines of Code |
-|------|---------|---------------|
-| `mcp-server/server.ts` | MCP server with all tools and cache logic | 1,451 |
-| `src-tauri/src/lib.rs` | Rust backend for Tauri app | 204 |
-| `src/App.tsx` | React UI for configuration and management | 1,188 |
-| `src/App.css` | Styles for the desktop app | ~500 |
+| File | Purpose |
+|------|---------|
+| `mcp-server/server.ts` | MCP server with all tools and cache logic |
+| `src-tauri/src/lib.rs` | Rust backend for Tauri app |
+| `src/App.tsx` | React UI for configuration and management |
 
-## Success Criteria ✅
+---
 
-- ✅ Search results include `children_count` and `children_preview` (first 5 children with their counts)
-- ✅ Bookmarks have `context` field that LLM can write to
-- ✅ `list_bookmarks` returns context with full details
-- ✅ UI displays and allows editing bookmark context with save/cancel actions
-- ✅ LLM can effectively choose between search results based on previews
-- ✅ Tool count reduced to exactly 10
-- ✅ All functionality works with automatic migrations
-- ✅ Auto-sync on startup for stale caches
-- ✅ Optimistic cache updates for write operations
-- ✅ Rate limiting properly enforced
+## Success Criteria
+
+- Search results include `children_count` and `children_preview`
+- Bookmarks have `context` field that LLM can write to
+- `list_bookmarks` returns context + user's AI instructions
+- LLM calls `list_bookmarks` first in every conversation
+- User's AI Instructions are loaded and followed
+- Selective sync keeps data fresh without rate limit issues
+- Calendar/date nodes aren't duplicated
+- All functionality works with automatic migrations
+- Auto-sync on startup for stale caches
+- Optimistic cache updates for write operations
+- Rate limiting properly enforced

@@ -187,6 +187,9 @@ const EXPORT_RATE_LIMIT_MS = 60000; // 1 minute
 // Stale threshold for cache (1 hour)
 const STALE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
 
+// Reserved bookmark name for AI instructions
+const AI_INSTRUCTIONS_BOOKMARK = "ai_instructions";
+
 function canCallExport(): { allowed: boolean; waitMs: number } {
   const now = Date.now();
   const elapsed = now - lastExportRequestTime;
@@ -498,6 +501,210 @@ async function ensureCacheFresh(
   return { synced: false, error: result.error };
 }
 
+// Sync a single node from the API and update cache
+async function syncSingleNode(
+  apiKey: string,
+  db: Database,
+  nodeId: string,
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const url = `https://workflowy.com/api/v1/nodes/${nodeId}`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      if (res.status === 404) {
+        // Node was deleted - remove from cache
+        db.run("DELETE FROM nodes WHERE id = ?", [nodeId]);
+        saveDb();
+        return { success: true };
+      }
+      throw new Error(`API error: ${res.status} ${res.statusText}`);
+    }
+
+    const responseData = (await res.json()) as {
+      node: {
+        id: string;
+        name?: string;
+        note?: string;
+        priority?: number;
+        completedAt?: number | null;
+        createdAt?: number;
+        modifiedAt?: number;
+      };
+    };
+
+    const node = responseData.node;
+    if (!node) {
+      return { success: false, error: "No node in response" };
+    }
+
+    // Update or insert the node (preserve parent_id and children_count from cache)
+    const existingResult = db.exec(
+      "SELECT parent_id, children_count FROM nodes WHERE id = ?",
+      [node.id],
+    );
+    const parentId = existingResult[0]?.values[0]?.[0] as string | null;
+    const childrenCount = (existingResult[0]?.values[0]?.[1] as number) ?? 0;
+
+    db.run(
+      `INSERT OR REPLACE INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        node.id,
+        node.name || "",
+        node.note || "",
+        parentId,
+        node.completedAt ? 1 : 0,
+        childrenCount,
+        node.priority || 0,
+        node.createdAt ? new Date(node.createdAt * 1000).toISOString() : null,
+        node.modifiedAt ? new Date(node.modifiedAt * 1000).toISOString() : null,
+      ],
+    );
+    saveDb();
+
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+// Sync children of a node from the API and update cache (1 level only)
+async function syncNodeChildren(
+  apiKey: string,
+  db: Database,
+  parentId: string | null, // null for top-level, "inbox"/"home" for targets, or UUID
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Build the URL with parent_id query param
+    let url = "https://workflowy.com/api/v1/nodes";
+    if (parentId === null) {
+      url += "?parent_id=None";
+    } else {
+      url += `?parent_id=${encodeURIComponent(parentId)}`;
+    }
+
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(`API error: ${res.status} ${res.statusText}`);
+    }
+
+    const responseData = (await res.json()) as {
+      nodes: Array<{
+        id: string;
+        name?: string;
+        note?: string;
+        priority?: number;
+        completedAt?: number | null;
+        createdAt?: number;
+        modifiedAt?: number;
+      }>;
+    };
+
+    const nodes = responseData.nodes || [];
+
+    // Get existing children from cache to detect deletions
+    const parentCondition = parentId === null ? "parent_id IS NULL" : "parent_id = ?";
+    const params = parentId === null ? [] : [parentId];
+    const existingResult = db.exec(
+      `SELECT id FROM nodes WHERE ${parentCondition}`,
+      params,
+    );
+    const existingIds = new Set(
+      existingResult[0]?.values.map((row) => row[0] as string) || [],
+    );
+
+    // Track which nodes we've seen from the API
+    const seenIds = new Set<string>();
+
+    // Update or insert each child node
+    for (const node of nodes) {
+      seenIds.add(node.id);
+
+      // Get existing children_count from cache (we don't want to reset it)
+      const childCountResult = db.exec(
+        "SELECT children_count FROM nodes WHERE id = ?",
+        [node.id],
+      );
+      const childrenCount = (childCountResult[0]?.values[0]?.[0] as number) ?? 0;
+
+      db.run(
+        `INSERT OR REPLACE INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          node.id,
+          node.name || "",
+          node.note || "",
+          parentId,
+          node.completedAt ? 1 : 0,
+          childrenCount,
+          node.priority || 0,
+          node.createdAt ? new Date(node.createdAt * 1000).toISOString() : null,
+          node.modifiedAt ? new Date(node.modifiedAt * 1000).toISOString() : null,
+        ],
+      );
+    }
+
+    // Remove nodes that no longer exist (deleted in Workflowy)
+    for (const existingId of existingIds) {
+      if (!seenIds.has(existingId as string)) {
+        // Recursively delete this node and all its descendants from cache
+        deleteNodeFromCache(db, existingId as string);
+      }
+    }
+
+    // Update parent's children_count
+    if (parentId && parentId !== "inbox" && parentId !== "home" && parentId !== "None") {
+      db.run(
+        "UPDATE nodes SET children_count = ? WHERE id = ?",
+        [nodes.length, parentId],
+      );
+    }
+
+    saveDb();
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+// Helper to recursively delete a node and its descendants from cache
+function deleteNodeFromCache(db: Database, nodeId: string): void {
+  // Get all children first
+  const childrenResult = db.exec(
+    "SELECT id FROM nodes WHERE parent_id = ?",
+    [nodeId],
+  );
+  const childIds = childrenResult[0]?.values.map((row) => row[0] as string) || [];
+
+  // Recursively delete children
+  for (const childId of childIds) {
+    deleteNodeFromCache(db, childId);
+  }
+
+  // Delete this node
+  db.run("DELETE FROM nodes WHERE id = ?", [nodeId]);
+}
+
 // Build a node tree with nested children up to specified depth
 interface NodeTree {
   id: string;
@@ -618,6 +825,58 @@ function getNodeFromCache(db: Database, nodeId: string): NodeTree | null {
   };
 }
 
+// Fetch user's AI instructions from the ai_instructions bookmark
+// Returns the node tree as formatted text, or null if not found
+function getAIInstructions(db: Database): string | null {
+  // Check if ai_instructions bookmark exists
+  const bookmarkResult = db.exec(
+    "SELECT node_id FROM bookmarks WHERE name = ?",
+    [AI_INSTRUCTIONS_BOOKMARK],
+  );
+
+  if (bookmarkResult.length === 0 || bookmarkResult[0].values.length === 0) {
+    return null;
+  }
+
+  const nodeId = bookmarkResult[0].values[0][0] as string;
+
+  // Get the node and its children (depth 3 for reasonable instruction nesting)
+  const node = getNodeFromCache(db, nodeId);
+  if (!node) {
+    return null;
+  }
+
+  // Build the tree with children
+  const children = buildNodeTree(db, nodeId, 3, 0);
+  
+  // Format as simple text for instructions
+  const lines: string[] = [];
+  
+  // Add the parent node's note if it has one (main instructions)
+  if (node.note && node.note.trim()) {
+    lines.push(node.note.trim());
+    lines.push("");
+  }
+  
+  // Format children as instruction items
+  function formatInstructionNodes(nodes: NodeTree[], indent: number = 0): void {
+    for (const n of nodes) {
+      const prefix = "  ".repeat(indent) + "- ";
+      lines.push(prefix + n.name);
+      if (n.note && n.note.trim()) {
+        lines.push("  ".repeat(indent + 1) + n.note.trim());
+      }
+      if (n.children && n.children.length > 0) {
+        formatInstructionNodes(n.children, indent + 1);
+      }
+    }
+  }
+  
+  formatInstructionNodes(children);
+  
+  return lines.length > 0 ? lines.join("\n") : null;
+}
+
 // Get API key from environment or config file
 function getApiKey(): string {
   // First check environment variable
@@ -692,6 +951,18 @@ async function validateWorkflowyToken(apiKey: string): Promise<void> {
 
 // Default tool definitions
 const defaultTools = [
+  // This tool MUST be first - it's the entry point for every conversation
+  {
+    name: "list_bookmarks",
+    description: `**START EVERY CONVERSATION BY CALLING THIS TOOL.** This returns saved Workflowy locations AND the user's custom AI instructions.
+
+The response contains:
+- bookmarks: Saved node locations with context notes
+- user_instructions: The user's custom preferences (if they have an 'ai_instructions' bookmark)
+
+IMPORTANT: If user_instructions exists in the response, follow those preferences for the entire conversation. These are the user's personal instructions for how you should interact with their Workflowy.`,
+    inputSchema: { type: "object", properties: {} },
+  },
   // Bookmark tools
   {
     name: "save_bookmark",
@@ -717,12 +988,6 @@ const defaultTools = [
       },
       required: ["name", "node_id"],
     },
-  },
-  {
-    name: "list_bookmarks",
-    description:
-      "List all saved bookmarks with their context notes. Start here to see what locations you've already discovered and saved. The context field contains notes about what each bookmark contains.",
-    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "delete_bookmark",
@@ -876,7 +1141,7 @@ PREFER multiline markdown over multiple create_node calls for efficiency.`,
         },
         limit: {
           type: "number",
-          description: "Maximum results to return (default: 20, max: 100)",
+          description: "Maximum results to return (default: 5, max: 100)",
         },
       },
       required: ["query"],
@@ -981,21 +1246,82 @@ This creates multiple nodes in ONE API call:
 **Marking tasks complete:**
 - update_node with completed=true
 
+## Calendar & Date Nodes
+Workflowy has a calendar system that auto-creates date nodes (e.g., "Jan 15, 2025", "Today - Jan 15", "Tomorrow - Jan 16"). These date nodes may have prefixes like "Today", "Yesterday", "Tomorrow" depending on user preferences.
+
+**CRITICAL: Always search before creating date-related content.**
+- Before adding items to a date, ALWAYS search for that date first
+- Date nodes may appear with different text (e.g., "Today - Jan 15" vs "Jan 15, 2025") - they are the SAME node
+- If a date node exists, use update_node or create_node with that node as parent - NEVER create a duplicate date
+- When searching for dates, try multiple formats: "Jan 15", "January 15", "2025-01-15", "Today"
+
+## AI Instructions (Custom User Preferences)
+Users can create a node in Workflowy called "AI Instructions" to customize your behavior. If you find such a node:
+
+1. **First session**: Search for "AI Instructions" node
+2. **If found**: Save it as a bookmark named "ai_instructions" (this exact name is reserved)
+3. **Future sessions**: The instructions will automatically load and appear at the end of these instructions
+
+The AI Instructions node can contain preferences like:
+- "Always add new tasks to my #inbox"
+- "Use checkboxes [ ] for tasks, not bullets"
+- "My calendar is under 'Daily Notes > 2025'"
+- "Prefer concise responses"
+
+If the user asks you to update their AI instructions, find the node and use update_node or create child nodes as needed.
+
 ## Tips
+- **ALWAYS UPDATE, NEVER DUPLICATE**: When adding to existing structures (dates, projects, lists), search first and add to the existing node rather than creating a new one
 - **EFFICIENCY**: Use multiline markdown in create_node to add multiple items in one call
 - get_node_tree returns compact text format - show it to the user without modification
 - Search results include children_preview so you can evaluate relevance in one call
 - Save bookmarks with detailed context to speed up future sessions
 - The cache auto-syncs when stale (>1 hour) but you can force sync with sync_nodes`;
 
-// Get server instructions dynamically
-function getServerInstructions(): string {
+// Get server instructions dynamically, including user's custom AI instructions
+function getServerInstructions(db: Database | null): string {
   const config = loadConfig();
-  return config.serverDescription || defaultServerInstructions;
+  const baseInstructions = config.serverDescription || defaultServerInstructions;
+  
+  // Try to append user's custom AI instructions from Workflowy
+  if (db) {
+    const userInstructions = getAIInstructions(db);
+    if (userInstructions) {
+      return `${baseInstructions}
+
+## User's Custom Instructions
+The user has configured the following custom instructions in their Workflowy "AI Instructions" node. Follow these preferences:
+
+${userInstructions}`;
+    }
+  }
+  
+  return baseInstructions;
 }
 
 // Main server setup
 async function main() {
+  // Initialize DB early so we can load user's custom instructions for the server
+  const db = await getDb();
+  
+  // Try to sync ai_instructions bookmark children before loading instructions
+  // This ensures we have fresh data at startup
+  try {
+    const apiKey = getApiKey();
+    const bookmarkResult = db.exec(
+      "SELECT node_id FROM bookmarks WHERE name = ?",
+      [AI_INSTRUCTIONS_BOOKMARK],
+    );
+    if (bookmarkResult.length > 0 && bookmarkResult[0].values.length > 0) {
+      const nodeId = bookmarkResult[0].values[0][0] as string;
+      await syncNodeChildren(apiKey, db, nodeId).catch(() => {});
+    }
+  } catch {
+    // Ignore errors - may not have API key configured yet
+  }
+  
+  const serverInstructions = getServerInstructions(db);
+  
   const server = new Server(
     {
       name: "workflowy-mcp",
@@ -1006,6 +1332,7 @@ async function main() {
         tools: {},
         prompts: {},
       },
+      instructions: serverInstructions,
     },
   );
 
@@ -1030,6 +1357,18 @@ async function main() {
     const { name } = request.params;
 
     if (name === "server_instructions") {
+      // Get db to load user's custom AI instructions
+      const db = await getDb();
+      
+      // Auto-sync at the start of each conversation (if cache is stale)
+      try {
+        const apiKey = getApiKey();
+        await ensureCacheFresh(apiKey, db);
+      } catch (e) {
+        // Ignore sync errors - instructions can still be returned
+        console.error("Auto-sync on conversation start failed:", e);
+      }
+      
       return {
         description: "Server instructions for working with Workflowy",
         messages: [
@@ -1037,7 +1376,7 @@ async function main() {
             role: "user",
             content: {
               type: "text",
-              text: getServerInstructions(),
+              text: getServerInstructions(db),
             },
           },
         ],
@@ -1086,14 +1425,56 @@ async function main() {
         const rows =
           results.length > 0
             ? results[0].values.map((row) => ({
-                name: row[0],
-                node_id: row[1],
+                name: row[0] as string,
+                node_id: row[1] as string,
                 context: row[2] || null,
                 created_at: row[3],
               }))
             : [];
+        
+        // Sync children of each bookmarked node
+        // For ai_instructions, we await to ensure fresh data for the response
+        // For others, sync in background
+        const aiInstructionsBookmark = rows.find(r => r.name === AI_INSTRUCTIONS_BOOKMARK);
+        
+        // Await sync for ai_instructions so we get fresh data
+        if (aiInstructionsBookmark?.node_id) {
+          await syncNodeChildren(apiKey, db, aiInstructionsBookmark.node_id).catch(() => {});
+        }
+        
+        // Sync other bookmarks in background
+        for (const row of rows) {
+          if (row.node_id && row.name !== AI_INSTRUCTIONS_BOOKMARK) {
+            syncNodeChildren(apiKey, db, row.node_id).catch(() => {});
+          }
+        }
+        
+        // Check if ai_instructions bookmark exists and get the instructions
+        const aiInstructions = getAIInstructions(db);
+        
+        // Build response with clear guidance for the LLM
+        const response: {
+          _instructions: string;
+          bookmarks: typeof rows;
+          user_instructions?: string;
+          action_required?: string;
+        } = {
+          _instructions: "READ THIS FIRST: Check user_instructions below for the user's custom AI preferences. Follow them for this entire conversation.",
+          bookmarks: rows,
+        };
+        
+        if (aiInstructions) {
+          response.user_instructions = aiInstructions;
+        } else if (!aiInstructionsBookmark) {
+          // No bookmark exists yet - tell LLM to search for it
+          response.action_required = "No 'ai_instructions' bookmark found. Search for a node named 'AI Instructions' in Workflowy using search_nodes. If found, read it with get_node_tree and save it as bookmark 'ai_instructions' for future sessions.";
+        } else {
+          // Bookmark exists but node is empty
+          response.user_instructions = "(No custom instructions configured yet)";
+        }
+        
         return {
-          content: [{ type: "text", text: JSON.stringify(rows, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(response, null, 2) }],
         };
       }
 
@@ -1126,6 +1507,12 @@ async function main() {
         const nodeId = args.node_id as string;
         const depth = Math.min(Math.max((args.depth as number) ?? 2, 1), 10);
         const format = (args.format as string) ?? "compact"; // "compact" or "json"
+
+        // Sync the immediate children of the requested node (1 level) to ensure fresh data
+        const syncParentId = nodeId === "None" ? null : nodeId;
+        await syncNodeChildren(apiKey, db, syncParentId).catch(() => {
+          // Ignore sync errors - use cached data
+        });
 
         // Check if cache exists
         const countResult = db.exec("SELECT COUNT(*) FROM nodes");
@@ -1260,6 +1647,12 @@ async function main() {
                 args.parent_id === "None" ? null : (args.parent_id as string),
               completed: false,
             });
+            
+            // Sync parent's children in background to get accurate state
+            const parentId = args.parent_id === "None" ? null : (args.parent_id as string);
+            syncNodeChildren(apiKey, db, parentId).catch(() => {
+              // Ignore sync errors
+            });
           }
         } catch {
           // Ignore cache update errors - will be fixed on next sync
@@ -1330,6 +1723,11 @@ async function main() {
               note: args.note as string | undefined,
               completed,
             });
+            
+            // Sync the updated node in background to get accurate state
+            syncSingleNode(apiKey, db, nodeId).catch(() => {
+              // Ignore sync errors
+            });
           }
         } catch {
           // Ignore cache update errors
@@ -1339,6 +1737,10 @@ async function main() {
       }
 
       case "delete_node": {
+        // Get the parent_id before deletion so we can sync parent's children after
+        const nodeToDelete = getNodeFromCache(db, args.node_id as string);
+        const parentId = nodeToDelete?.parent_id || null;
+        
         const response = await workflowyRequest(
           apiKey,
           `/api/v1/nodes/${args.node_id}`,
@@ -1350,6 +1752,11 @@ async function main() {
           const responseData = JSON.parse(response.content[0].text);
           if (responseData.ok) {
             updateNodeCache(db, "delete", { id: args.node_id as string });
+            
+            // Sync parent's children in background to confirm deletion
+            syncNodeChildren(apiKey, db, parentId).catch(() => {
+              // Ignore sync errors
+            });
           }
         } catch {
           // Ignore cache update errors
@@ -1359,6 +1766,11 @@ async function main() {
       }
 
       case "move_node": {
+        // Get the old parent_id before move so we can sync both old and new parent
+        const nodeToMove = getNodeFromCache(db, args.node_id as string);
+        const oldParentId = nodeToMove?.parent_id || null;
+        const newParentId = args.parent_id === "None" ? null : (args.parent_id as string);
+        
         const response = await workflowyRequest(
           apiKey,
           `/api/v1/nodes/${args.node_id}/move`,
@@ -1374,9 +1786,12 @@ async function main() {
           if (responseData.ok) {
             updateNodeCache(db, "update", {
               id: args.node_id as string,
-              parent_id:
-                args.parent_id === "None" ? null : (args.parent_id as string),
+              parent_id: newParentId,
             });
+            
+            // Sync both old and new parent's children in background
+            syncNodeChildren(apiKey, db, oldParentId).catch(() => {});
+            syncNodeChildren(apiKey, db, newParentId).catch(() => {});
           }
         } catch {
           // Ignore cache update errors
@@ -1392,7 +1807,7 @@ async function main() {
 
         const query = args.query as string;
         const includeCompleted = (args.include_completed as boolean) ?? false;
-        const limit = Math.min((args.limit as number) ?? 20, 100);
+        const limit = Math.min((args.limit as number) ?? 5, 100);
 
         // Check if cache exists
         const countResult = db.exec("SELECT COUNT(*) FROM nodes");
