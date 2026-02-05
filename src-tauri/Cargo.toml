@@ -1,6 +1,6 @@
 [package]
 name = "workflowy-local-mcp"
-version = "1.0.0"
+version = "1.1.0"
 description = "Workflowy Local MCP Server Desktop App"
 authors = ["Rodolfo Lopez"]
 edition = "2021"

@@ -180,6 +180,53 @@ function saveDb(): void {
   fs.writeFileSync(dbPath, buffer);
 }
 
+// MCP Log entry interface
+interface McpLogEntry {
+  timestamp: string;
+  message: string;
+  type: "info" | "success" | "error" | "warning";
+  source: "mcp";
+}
+
+// Write log entry to shared mcp-logs.json file
+function writeMcpLog(message: string, type: McpLogEntry["type"] = "info"): void {
+  try {
+    const dataDir = getDataDir();
+    const logPath = path.join(dataDir, "mcp-logs.json");
+    
+    // Read existing logs
+    let logs: McpLogEntry[] = [];
+    if (fs.existsSync(logPath)) {
+      try {
+        const content = fs.readFileSync(logPath, "utf-8");
+        logs = JSON.parse(content);
+      } catch {
+        // If file is corrupted, start fresh
+        logs = [];
+      }
+    }
+    
+    // Add new entry
+    const entry: McpLogEntry = {
+      timestamp: new Date().toISOString(),
+      message,
+      type,
+      source: "mcp",
+    };
+    logs.push(entry);
+    
+    // Keep only last 200 entries
+    if (logs.length > 200) {
+      logs = logs.slice(-200);
+    }
+    
+    // Write back
+    fs.writeFileSync(logPath, JSON.stringify(logs, null, 2));
+  } catch {
+    // Silently fail - don't let logging errors break the server
+  }
+}
+
 // Rate limiting for nodes-export endpoint (1 request per minute)
 let lastExportRequestTime: number = 0;
 const EXPORT_RATE_LIMIT_MS = 60000; // 1 minute
@@ -618,6 +665,11 @@ async function syncNodeChildren(
     };
 
     const nodes = responseData.nodes || [];
+    
+    writeMcpLog(`[syncNodeChildren] Parent: ${parentId}, API returned ${nodes.length} children`, "info");
+    if (nodes.length > 0) {
+      writeMcpLog(`[syncNodeChildren] Children: ${nodes.map(n => n.name?.substring(0, 30)).join(', ')}`, "info");
+    }
 
     // Get existing children from cache to detect deletions
     const parentCondition = parentId === null ? "parent_id IS NULL" : "parent_id = ?";
@@ -1366,7 +1418,7 @@ async function main() {
         await ensureCacheFresh(apiKey, db);
       } catch (e) {
         // Ignore sync errors - instructions can still be returned
-        console.error("Auto-sync on conversation start failed:", e);
+        writeMcpLog(`Auto-sync on conversation start failed: ${e}`, "warning");
       }
       
       return {
@@ -1508,11 +1560,38 @@ async function main() {
         const depth = Math.min(Math.max((args.depth as number) ?? 2, 1), 10);
         const format = (args.format as string) ?? "compact"; // "compact" or "json"
 
-        // Sync the immediate children of the requested node (1 level) to ensure fresh data
+        // Sync children to match the requested depth (up to 2 levels to avoid too many API calls)
         const syncParentId = nodeId === "None" ? null : nodeId;
-        await syncNodeChildren(apiKey, db, syncParentId).catch(() => {
-          // Ignore sync errors - use cached data
-        });
+        
+        // First level: sync immediate children
+        await syncNodeChildren(apiKey, db, syncParentId).catch(() => {});
+        
+        // Second level: if depth > 1, also sync grandchildren (children of immediate children)
+        // This ensures we have fresh data for the nodes we'll display
+        if (depth > 1) {
+          // Get the immediate children we just synced
+          const childrenResult = db.exec(
+            syncParentId === null 
+              ? "SELECT id FROM nodes WHERE parent_id IS NULL"
+              : "SELECT id FROM nodes WHERE parent_id = ?",
+            syncParentId === null ? [] : [syncParentId],
+          );
+          const childIds = childrenResult[0]?.values.map((row) => row[0] as string) || [];
+          
+          writeMcpLog(`[get_node_tree] Syncing ${childIds.length} grandchildren for depth=${depth}`, "info");
+          
+          // Sync each child's children sequentially to avoid SQLite concurrency issues
+          for (const childId of childIds) {
+            const result = await syncNodeChildren(apiKey, db, childId).catch((e) => ({ success: false, error: String(e) }));
+            // Verify what's in DB after sync
+            const verifyResult = db.exec(
+              "SELECT COUNT(*) as count FROM nodes WHERE parent_id = ?",
+              [childId],
+            );
+            const childCount = verifyResult[0]?.values[0]?.[0] ?? 0;
+            writeMcpLog(`[get_node_tree] Synced children of ${childId}: ${JSON.stringify(result)}, DB now has ${childCount} children`, "info");
+          }
+        }
 
         // Check if cache exists
         const countResult = db.exec("SELECT COUNT(*) FROM nodes");
@@ -1942,7 +2021,7 @@ async function main() {
   // Start the server with stdio transport
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Workflowy MCP Server running on stdio");
+  writeMcpLog("Workflowy MCP Server running on stdio", "success");
 
   // Auto-sync on startup if cache is stale (>24 hours)
   try {
@@ -1963,28 +2042,29 @@ async function main() {
     }
 
     if (shouldSync) {
-      console.error("Cache is stale or empty, starting background sync...");
+      writeMcpLog("Cache is stale or empty, starting background sync...", "info");
       // Run sync in background (don't await)
       performFullSync(apiKey, db)
         .then((result) => {
           if (result.success) {
-            console.error(
+            writeMcpLog(
               `Background sync complete: ${result.nodes_synced} nodes synced`,
+              "success"
             );
           } else {
-            console.error(`Background sync failed: ${result.error}`);
+            writeMcpLog(`Background sync failed: ${result.error}`, "error");
           }
         })
         .catch((err) => {
-          console.error(`Background sync error: ${err}`);
+          writeMcpLog(`Background sync error: ${err}`, "error");
         });
     } else {
-      console.error("Cache is fresh, skipping auto-sync");
+      writeMcpLog("Cache is fresh, skipping auto-sync", "info");
     }
   } catch (err) {
     // Don't fail startup if auto-sync check fails
-    console.error(`Auto-sync check failed: ${err}`);
+    writeMcpLog(`Auto-sync check failed: ${err}`, "error");
   }
 }
 
-main().catch(console.error);
+main().catch((err) => writeMcpLog(`Main error: ${err}`, "error"));

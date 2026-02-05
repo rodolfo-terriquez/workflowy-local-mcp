@@ -267,7 +267,7 @@ body {
     background: rgba(0, 0, 0, 0.4);
     border-radius: 8px;
     padding: 12px;
-    max-height: 150px;
+    max-height: 500px;
     overflow-y: auto;
     font-family: "Monaco", "Menlo", monospace;
     font-size: 12px;
@@ -288,6 +288,38 @@ body {
 
 .log-entry.error {
     color: #f87171;
+}
+
+.log-entry.warning {
+    color: #fbbf24;
+}
+
+/* Log source badges */
+.log-source {
+    font-weight: 600;
+    font-size: 10px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    margin-right: 4px;
+}
+
+.log-source-app {
+    background: rgba(99, 102, 241, 0.2);
+    color: #a5a8fc;
+}
+
+.log-source-mcp {
+    background: rgba(34, 197, 94, 0.2);
+    color: #86efac;
+}
+
+/* Logs controls */
+.logs-controls {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 16px;
+    margin-bottom: 16px;
 }
 
 .toast {

@@ -13,6 +13,7 @@ All planned enhancements have been successfully implemented and are production-r
 - **AI Instructions system** for user-customizable LLM behavior
 - Full desktop UI for configuration and management
 - Automatic database migrations for seamless upgrades
+- **Shared JSON logging** - MCP server logs visible in app's Logs tab
 
 ---
 
@@ -347,6 +348,46 @@ The `ai_instructions` bookmark name is reserved for the AI Instructions feature.
 2. Syncs its children before reading
 3. Includes its content in `list_bookmarks` response
 
+### Shared JSON Logging
+
+**Problem:** MCP server logs only went to stderr, invisible to users in the app.
+
+**Solution:** MCP server writes logs to a shared JSON file that the app reads and displays.
+
+**How it works:**
+
+1. **MCP server writes logs** to `mcp-logs.json` in the app's data directory:
+   ```typescript
+   function writeMcpLog(message: string, type: "info" | "success" | "error" | "warning"): void
+   ```
+
+2. **Log format:**
+   ```json
+   {
+     "timestamp": "2026-02-04T10:30:00.000Z",
+     "message": "Background sync complete: 150 nodes synced",
+     "type": "success",
+     "source": "mcp"
+   }
+   ```
+
+3. **Rust backend** provides `get_mcp_logs` command to read the file
+
+4. **React UI** merges MCP logs with app logs, sorted by timestamp
+
+**Key features:**
+- Keeps last 200 log entries (auto-truncates)
+- Auto-refresh every 3 seconds while on Logs tab
+- Manual refresh button available
+- Logs show source badge: `[APP]` or `[MCP]`
+- Color-coded by type: info (blue), success (green), warning (yellow), error (red)
+
+**Implementation locations:**
+- `writeMcpLog()`: `mcp-server/server.ts` lines 192-228
+- `McpLogEntry` struct: `src-tauri/src/lib.rs` lines 74-80
+- `get_mcp_logs` command: `src-tauri/src/lib.rs` lines 199-214
+- UI integration: `src/App.tsx` Logs section
+
 ---
 
 ## Development Setup
@@ -402,3 +443,4 @@ The `ai_instructions` bookmark name is reserved for the AI Instructions feature.
 - Auto-sync on startup for stale caches
 - Optimistic cache updates for write operations
 - Rate limiting properly enforced
+- MCP logs appear in app's Logs tab with auto-refresh

@@ -5,8 +5,16 @@ import "./App.css";
 interface LogEntry {
   id: number;
   message: string;
-  type: "info" | "success" | "error";
+  type: "info" | "success" | "error" | "warning";
   timestamp: Date;
+  source: "app" | "mcp";
+}
+
+interface McpLogEntry {
+  timestamp: string;
+  message: string;
+  log_type: string;
+  source: string;
 }
 
 interface ToolDefinition {
@@ -179,6 +187,9 @@ function App() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncCooldown, setSyncCooldown] = useState(0);
 
+  // MCP logs state
+  const [mcpLogs, setMcpLogs] = useState<LogEntry[]>([]);
+
   useEffect(() => {
     loadConfig();
     loadServerPath();
@@ -198,6 +209,23 @@ function App() {
       loadCacheStatus();
     }
   }, [activeSection, savedApiKey]);
+
+  // Load MCP logs when logs section is active
+  useEffect(() => {
+    if (activeSection === "general") {
+      loadMcpLogs();
+    }
+  }, [activeSection]);
+
+  // Auto-refresh logs while on logs tab
+  useEffect(() => {
+    if (activeSection === "general") {
+      const interval = setInterval(() => {
+        loadMcpLogs();
+      }, 3000); // Refresh every 3 seconds
+      return () => clearInterval(interval);
+    }
+  }, [activeSection]);
 
   const loadCacheStatus = async () => {
     if (!savedApiKey) return;
@@ -253,6 +281,34 @@ function App() {
     } catch (e) {
       console.error("Failed to load cache status:", e);
       addLog(`Failed to load cache status: ${e}`, "error");
+    }
+  };
+
+  const loadMcpLogs = async () => {
+    try {
+      const result = await invoke<McpLogEntry[]>("get_mcp_logs");
+      const convertedLogs: LogEntry[] = result.map((entry, index) => ({
+        id: new Date(entry.timestamp).getTime() + index,
+        message: entry.message,
+        type: entry.log_type as LogEntry["type"],
+        timestamp: new Date(entry.timestamp),
+        source: "mcp" as const,
+      }));
+      setMcpLogs(convertedLogs);
+    } catch (e) {
+      console.error("Failed to load MCP logs:", e);
+    }
+  };
+
+  const clearAllLogs = async () => {
+    // Clear app logs
+    setLogs([]);
+    // Clear MCP logs (both state and file)
+    setMcpLogs([]);
+    try {
+      await invoke("clear_mcp_logs");
+    } catch (e) {
+      console.error("Failed to clear MCP logs:", e);
     }
   };
 
@@ -596,7 +652,7 @@ function App() {
   const addLog = (message: string, type: LogEntry["type"] = "info") => {
     setLogs((prev) => [
       ...prev.slice(-50),
-      { id: Date.now(), message, type, timestamp: new Date() },
+      { id: Date.now(), message, type, timestamp: new Date(), source: "app" as const },
     ]);
   };
 
@@ -740,7 +796,7 @@ function App() {
           </div>
         </div>
         <div className="sidebar-footer">
-          <span className="version">v1.0.3</span>
+          <span className="version">v1.1.0</span>
         </div>
       </div>
 
@@ -755,17 +811,30 @@ function App() {
                 <p>View activity and status information</p>
               </div>
 
-              {/* Activity Log */}
+              <div className="logs-controls">
+                <button
+                  className="button button-secondary button-small"
+                  onClick={clearAllLogs}
+                >
+                  Clear Logs
+                </button>
+              </div>
+
+              {/* Activity Log - merged and sorted by timestamp */}
               <div className="log-container">
-                {logs.length === 0 ? (
-                  <div className="log-entry">No activity yet</div>
-                ) : (
-                  logs.map((log) => (
-                    <div key={log.id} className={`log-entry ${log.type}`}>
-                      [{formatTime(log.timestamp)}] {log.message}
+                {(() => {
+                  const allLogs = [...logs, ...mcpLogs].sort(
+                    (a, b) => a.timestamp.getTime() - b.timestamp.getTime()
+                  );
+                  if (allLogs.length === 0) {
+                    return <div className="log-entry">No activity yet</div>;
+                  }
+                  return allLogs.map((log) => (
+                    <div key={`${log.source}-${log.id}`} className={`log-entry ${log.type}`}>
+                      [{formatTime(log.timestamp)}] <span className={`log-source log-source-${log.source}`}>[{log.source.toUpperCase()}]</span> {log.message}
                     </div>
-                  ))
-                )}
+                  ));
+                })()}
               </div>
             </>
           )}

@@ -1,5 +1,5 @@
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::Manager;
 
@@ -68,6 +68,15 @@ struct Bookmark {
     node_id: String,
     context: Option<String>,
     created_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct McpLogEntry {
+    timestamp: String,
+    message: String,
+    #[serde(alias = "type")]
+    log_type: String,
+    source: String,
 }
 
 /// Run database migrations to ensure schema is up to date
@@ -176,6 +185,43 @@ fn update_bookmark_context(
     Ok(())
 }
 
+#[tauri::command]
+fn get_mcp_logs(app_handle: tauri::AppHandle) -> Result<Vec<McpLogEntry>, String> {
+    let app_data = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let log_path = app_data.join("mcp-logs.json");
+
+    if !log_path.exists() {
+        return Ok(vec![]);
+    }
+
+    let content = std::fs::read_to_string(&log_path)
+        .map_err(|e| format!("Failed to read mcp-logs.json: {}", e))?;
+
+    let logs: Vec<McpLogEntry> = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse mcp-logs.json: {}", e))?;
+
+    Ok(logs)
+}
+
+#[tauri::command]
+fn clear_mcp_logs(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let app_data = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let log_path = app_data.join("mcp-logs.json");
+
+    if log_path.exists() {
+        std::fs::write(&log_path, "[]")
+            .map_err(|e| format!("Failed to clear mcp-logs.json: {}", e))?;
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -188,7 +234,9 @@ pub fn run() {
             get_server_path,
             get_bookmarks,
             delete_bookmark,
-            update_bookmark_context
+            update_bookmark_context,
+            get_mcp_logs,
+            clear_mcp_logs
         ])
         .setup(|app| {
             // Copy MCP server from bundle to data directory
