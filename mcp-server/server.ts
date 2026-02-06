@@ -1084,14 +1084,25 @@ IMPORTANT: If user_instructions exists in the response, follow those preferences
     name: "create_node",
     description: `Create a new node in Workflowy. SUPPORTS MARKDOWN for creating multiple nested nodes in ONE call.
 
-**MULTILINE NODES**: Use \\n\\n (double newline) to create siblings. First line = parent, subsequent lines = children.
+**MULTILINE NODES**: Separate siblings with blank lines (actual newlines). First line = parent, subsequent lines = children.
 **MARKDOWN HEADERS**: # h1, ## h2, ### h3 create header nodes
 **BULLETS**: - item creates bullet points
 **TODOS**: - [ ] task creates unchecked todo, - [x] task creates checked todo
 **FORMATTING**: **bold**, *italic*, \`code\`, [link](url)
 
 EXAMPLE - Create a full structure in ONE call:
-name: "## Topics Discussed\\n\\n- First topic\\n\\n- Second topic\\n\\n## Decisions\\n\\n- Decision one\\n\\n- Decision two"
+name:
+"## Topics Discussed
+
+- First topic
+
+- Second topic
+
+## Decisions
+
+- Decision one
+
+- Decision two"
 
 This creates:
   Topics Discussed (h2)
@@ -1101,6 +1112,8 @@ This creates:
     Decision one
     Decision two
 
+IMPORTANT: Use actual line breaks to separate items. Do NOT use the literal string \\n\\n — it will be stored as text, not parsed as newlines.
+
 PREFER multiline markdown over multiple create_node calls for efficiency.`,
     inputSchema: {
       type: "object",
@@ -1108,7 +1121,7 @@ PREFER multiline markdown over multiple create_node calls for efficiency.`,
         name: {
           type: "string",
           description:
-            "The text content. Use \\n\\n for siblings, markdown for structure (# h1, ## h2, - bullet, - [ ] todo, **bold**)",
+            "The text content. Separate siblings with blank lines (actual newlines, NOT literal \\\\n). Use markdown for structure (# h1, ## h2, - bullet, - [ ] todo, **bold**)",
         },
         parent_id: {
           type: "string",
@@ -1286,13 +1299,22 @@ The context field is for YOU to write notes about:
 \`\`\`
 create_node(
   parent_id: "node-uuid",
-  name: "## Section Title\\n\\n- First item\\n\\n- Second item\\n\\n## Another Section\\n\\n- More items"
+  name: "## Section Title
+
+- First item
+
+- Second item
+
+## Another Section
+
+- More items"
 )
 \`\`\`
 
 This creates multiple nodes in ONE API call:
-- Use \\n\\n (double newline) between siblings
+- Separate siblings with blank lines (actual newlines in the name field)
 - Use ## for headers, - for bullets, - [ ] for todos
+- IMPORTANT: Do NOT use the literal string \\n\\n — use actual line breaks
 - NEVER make multiple create_node calls when you can use multiline markdown instead
 
 **Marking tasks complete:**
