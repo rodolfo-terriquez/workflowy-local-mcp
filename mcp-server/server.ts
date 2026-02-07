@@ -12,6 +12,7 @@ import type { Database } from "sql.js";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
+import { defaultServerInstructions, toolDescriptions } from "../shared/constants.js";
 
 // Config interface
 interface Config {
@@ -1001,25 +1002,18 @@ async function validateWorkflowyToken(apiKey: string): Promise<void> {
   }
 }
 
-// Default tool definitions
+// Default tool definitions - descriptions imported from shared/constants.ts
 const defaultTools = [
   // This tool MUST be first - it's the entry point for every conversation
   {
     name: "list_bookmarks",
-    description: `**START EVERY CONVERSATION BY CALLING THIS TOOL.** This returns saved Workflowy locations AND the user's custom AI instructions.
-
-The response contains:
-- bookmarks: Saved node locations with context notes
-- user_instructions: The user's custom preferences (if they have an 'ai_instructions' bookmark)
-
-IMPORTANT: If user_instructions exists in the response, follow those preferences for the entire conversation. These are the user's personal instructions for how you should interact with their Workflowy.`,
+    description: toolDescriptions.list_bookmarks,
     inputSchema: { type: "object", properties: {} },
   },
   // Bookmark tools
   {
     name: "save_bookmark",
-    description:
-      "Save a Workflowy node with a name and context notes. The context field is for YOU (the LLM) to write notes about what this node contains and how to use it in future sessions. Check similar bookmarks before creating a new one to avoid duplicates.",
+    description: toolDescriptions.save_bookmark,
     inputSchema: {
       type: "object",
       properties: {
@@ -1043,7 +1037,7 @@ IMPORTANT: If user_instructions exists in the response, follow those preferences
   },
   {
     name: "delete_bookmark",
-    description: "Delete a saved bookmark by name.",
+    description: toolDescriptions.delete_bookmark,
     inputSchema: {
       type: "object",
       properties: {
@@ -1055,8 +1049,7 @@ IMPORTANT: If user_instructions exists in the response, follow those preferences
   // Workflowy read tools
   {
     name: "get_node_tree",
-    description:
-      "Get a node and its nested children. Returns markdown with items showing '(N children)' when they have nested content. Show this to the user so they know which items can be expanded further.",
+    description: toolDescriptions.get_node_tree,
     inputSchema: {
       type: "object",
       properties: {
@@ -1082,39 +1075,7 @@ IMPORTANT: If user_instructions exists in the response, follow those preferences
   // Workflowy write tools
   {
     name: "create_node",
-    description: `Create a new node in Workflowy. SUPPORTS MARKDOWN for creating multiple nested nodes in ONE call.
-
-**MULTILINE NODES**: Separate siblings with blank lines (actual newlines). First line = parent, subsequent lines = children.
-**MARKDOWN HEADERS**: # h1, ## h2, ### h3 create header nodes
-**BULLETS**: - item creates bullet points
-**TODOS**: - [ ] task creates unchecked todo, - [x] task creates checked todo
-**FORMATTING**: **bold**, *italic*, \`code\`, [link](url)
-
-EXAMPLE - Create a full structure in ONE call:
-name:
-"## Topics Discussed
-
-- First topic
-
-- Second topic
-
-## Decisions
-
-- Decision one
-
-- Decision two"
-
-This creates:
-  Topics Discussed (h2)
-    First topic
-    Second topic
-  Decisions (h2)
-    Decision one
-    Decision two
-
-IMPORTANT: Use actual line breaks to separate items. Do NOT use the literal string \\n\\n — it will be stored as text, not parsed as newlines.
-
-PREFER multiline markdown over multiple create_node calls for efficiency.`,
+    description: toolDescriptions.create_node,
     inputSchema: {
       type: "object",
       properties: {
@@ -1143,8 +1104,7 @@ PREFER multiline markdown over multiple create_node calls for efficiency.`,
   },
   {
     name: "update_node",
-    description:
-      "Update an existing node's name, note, or completed status. Use this to edit content or mark tasks complete/incomplete.",
+    description: toolDescriptions.update_node,
     inputSchema: {
       type: "object",
       properties: {
@@ -1162,8 +1122,7 @@ PREFER multiline markdown over multiple create_node calls for efficiency.`,
   },
   {
     name: "delete_node",
-    description:
-      "Permanently delete a node and all its children. Use with caution.",
+    description: toolDescriptions.delete_node,
     inputSchema: {
       type: "object",
       properties: {
@@ -1174,7 +1133,7 @@ PREFER multiline markdown over multiple create_node calls for efficiency.`,
   },
   {
     name: "move_node",
-    description: "Move a node to a different parent location.",
+    description: toolDescriptions.move_node,
     inputSchema: {
       type: "object",
       properties: {
@@ -1191,8 +1150,7 @@ PREFER multiline markdown over multiple create_node calls for efficiency.`,
   // Cache and search tools
   {
     name: "search_nodes",
-    description:
-      "Search Workflowy nodes by text. Returns matches with their path AND a preview of their children (first 5 children with their child counts). Use the children_preview to evaluate which result is most relevant without needing additional reads.",
+    description: toolDescriptions.search_nodes,
     inputSchema: {
       type: "object",
       properties: {
@@ -1214,8 +1172,7 @@ PREFER multiline markdown over multiple create_node calls for efficiency.`,
   },
   {
     name: "sync_nodes",
-    description:
-      "Sync all Workflowy nodes to local cache for searching. Rate limited to once per minute. Use this before searching if cache is empty or stale.",
+    description: toolDescriptions.sync_nodes,
     inputSchema: {
       type: "object",
       properties: {
@@ -1240,117 +1197,7 @@ function getTools() {
   }));
 }
 
-// Default server instructions
-const defaultServerInstructions = `This MCP server connects to a user's Workflowy account. Workflowy is an outliner app where notes are organized as nested bullet points (nodes).
-
-## Key Concepts
-- Nodes have a UUID (id), name (text content), and optional note (description)
-- Nodes can be nested infinitely under other nodes (parent_id)
-- Special locations: 'inbox', 'home', or 'None' (top-level)
-
-## Start with Bookmarks
-**Always check bookmarks first** when the user asks about specific content. Bookmarks contain context notes that tell you what each location contains and how to use it.
-
-1. Call list_bookmarks to see all saved locations with their context
-2. If a relevant bookmark exists, use get_node_tree with that node_id
-3. If no bookmark matches, use search_nodes to find the content
-
-## Displaying Node Trees
-get_node_tree returns pre-formatted markdown. Display this output directly to the user WITHOUT modifications:
-- Do NOT summarize or paraphrase
-- Do NOT convert to tables
-- Do NOT remove the ▾ symbols (they indicate nested content)
-- Just show the markdown as-is
-
-## Search with Child Previews
-search_nodes returns matches with a **preview of their children** (first 5 children + total count). This lets you evaluate which result is relevant in ONE call:
-
-- children_count: How many items are inside this node
-- children_preview: First 5 children with their names and child counts
-- Use this to identify the right result without needing additional reads
-
-## Saving Bookmarks with Context
-When you find an important location, save it with context notes for future sessions:
-
-\`\`\`
-save_bookmark(
-  name: "daily_tasks",
-  node_id: "abc-123",
-  context: "User's daily todo list. Items use [ ] for incomplete, [x] for complete. Check here first when user asks about tasks."
-)
-\`\`\`
-
-The context field is for YOU to write notes about:
-- What the node contains
-- How items are formatted
-- When to use this bookmark
-
-## Common Workflows
-
-**Answering "What are my tasks?"**
-1. list_bookmarks → Check if a tasks bookmark exists with context
-2. If yes: get_node_tree with that node_id → Present output as-is
-3. If no: search_nodes("tasks") → Use children_preview to pick the right result → Save bookmark for next time
-
-**Creating new content (IMPORTANT - use multiline markdown):**
-1. list_bookmarks to find the right parent location
-2. Use ONE create_node call with multiline markdown to create entire structures:
-
-\`\`\`
-create_node(
-  parent_id: "node-uuid",
-  name: "## Section Title
-
-- First item
-
-- Second item
-
-## Another Section
-
-- More items"
-)
-\`\`\`
-
-This creates multiple nodes in ONE API call:
-- Separate siblings with blank lines (actual newlines in the name field)
-- Use ## for headers, - for bullets, - [ ] for todos
-- IMPORTANT: Do NOT use the literal string \\n\\n — use actual line breaks
-- NEVER make multiple create_node calls when you can use multiline markdown instead
-
-**Marking tasks complete:**
-- update_node with completed=true
-
-## Calendar & Date Nodes
-Workflowy has a calendar system that auto-creates date nodes (e.g., "Jan 15, 2025", "Today - Jan 15", "Tomorrow - Jan 16"). These date nodes may have prefixes like "Today", "Yesterday", "Tomorrow" depending on user preferences.
-
-**CRITICAL: Always search before creating date-related content.**
-- Before adding items to a date, ALWAYS search for that date first
-- Date nodes may appear with different text (e.g., "Today - Jan 15" vs "Jan 15, 2025") - they are the SAME node
-- If a date node exists, use update_node or create_node with that node as parent - NEVER create a duplicate date
-- When searching for dates, try multiple formats: "Jan 15", "January 15", "2025-01-15", "Today"
-
-## AI Instructions (Custom User Preferences)
-Users can create a node in Workflowy called "AI Instructions" to customize your behavior. If you find such a node:
-
-1. **First session**: Search for "AI Instructions" node
-2. **If found**: Save it as a bookmark named "ai_instructions" (this exact name is reserved)
-3. **Future sessions**: The instructions will automatically load and appear at the end of these instructions
-
-The AI Instructions node can contain preferences like:
-- "Always add new tasks to my #inbox"
-- "Use checkboxes [ ] for tasks, not bullets"
-- "My calendar is under 'Daily Notes > 2025'"
-- "Prefer concise responses"
-
-If the user asks you to update their AI instructions, find the node and use update_node or create child nodes as needed.
-
-## Tips
-- **ALWAYS UPDATE, NEVER DUPLICATE**: When adding to existing structures (dates, projects, lists), search first and add to the existing node rather than creating a new one
-- **EFFICIENCY**: Use multiline markdown in create_node to add multiple items in one call
-- get_node_tree returns compact text format - show it to the user without modification
-- Search results include children_preview so you can evaluate relevance in one call
-- Save bookmarks with detailed context to speed up future sessions
-- The cache auto-syncs when stale (>1 hour) but you can force sync with sync_nodes`;
+// Default server instructions are imported from shared/constants.ts
 
 // Get server instructions dynamically, including user's custom AI instructions
 function getServerInstructions(db: Database | null): string {

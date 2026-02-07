@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
+import { defaultServerInstructions, defaultTools } from "../shared/constants";
 
 interface LogEntry {
   id: number;
@@ -17,11 +18,6 @@ interface McpLogEntry {
   source: string;
 }
 
-interface ToolDefinition {
-  name: string;
-  defaultDescription: string;
-}
-
 interface Bookmark {
   name: string;
   node_id: string;
@@ -29,118 +25,7 @@ interface Bookmark {
   created_at: string | null;
 }
 
-// Default server instructions matching the MCP server
-const defaultServerInstructions = `This MCP server connects to a user's Workflowy account. Workflowy is an outliner app where notes are organized as nested bullet points (nodes).
-
-## Key Concepts
-- Nodes have a UUID (id), name (text content), and optional note (description)
-- Nodes can be nested infinitely under other nodes (parent_id)
-- Special locations: 'inbox', 'home', or 'None' (top-level)
-
-## Start with Bookmarks
-**Always check bookmarks first** when the user asks about specific content. Bookmarks contain context notes that tell you what each location contains and how to use it.
-
-1. Call list_bookmarks to see all saved locations with their context
-2. If a relevant bookmark exists, use get_node_tree with that node_id
-3. If no bookmark matches, use search_nodes to find the content
-
-## Displaying Node Trees
-get_node_tree returns content in **compact text format** optimized for readability:
-- Shows node names with child previews (max 3 children per node)
-- Format: "• Node (Child1 ▾2, Child2 ▾0, Child3 ▾5, ...4)"
-- The ▾ character shows how many children each child has
-- **IMPORTANT: Present this output to the user AS-IS without paraphrasing or summarizing**
-- Nodes named "AI Messages" are automatically filtered (access via bookmarks instead)
-
-## Search with Child Previews
-search_nodes returns matches with a **preview of their children** (first 5 children + total count). This lets you evaluate which result is relevant in ONE call:
-
-- children_count: How many items are inside this node
-- children_preview: First 5 children with their names and child counts
-- Use this to identify the right result without needing additional reads
-
-## Saving Bookmarks with Context
-When you find an important location, save it with context notes for future sessions:
-
-save_bookmark(
-  name: "daily_tasks",
-  node_id: "abc-123",
-  context: "User's daily todo list. Items use [ ] for incomplete, [x] for complete."
-)
-
-The context field is for YOU to write notes about what the node contains, how items are formatted, and when to use this bookmark.
-
-## Common Workflows
-
-**Answering "What are my tasks?"**
-1. list_bookmarks - Check if a tasks bookmark exists with context
-2. If yes: get_node_tree with that node_id → Present output as-is
-3. If no: search_nodes("tasks") - Use children_preview to pick the right result, then save bookmark
-
-**Creating new content:**
-1. list_bookmarks to find the right parent location
-2. create_node with that node_id as parent_id
-
-**Marking tasks complete:**
-- update_node with completed=true
-
-## Tips
-- get_node_tree returns compact text format - show it to the user without modification
-- Search results include children_preview so you can evaluate relevance in one call
-- Save bookmarks with detailed context to speed up future sessions
-- The cache auto-syncs when stale (>1 hour) but you can force sync with sync_nodes`;
-
-// Default tool definitions matching the MCP server
-const defaultTools: ToolDefinition[] = [
-  {
-    name: "save_bookmark",
-    defaultDescription:
-      "Save a Workflowy node with a name and context notes. The context field is for YOU (the LLM) to write notes about what this node contains and how to use it in future sessions.",
-  },
-  {
-    name: "list_bookmarks",
-    defaultDescription:
-      "List all saved bookmarks with their context notes. Start here to see what locations you've already discovered and saved.",
-  },
-  {
-    name: "delete_bookmark",
-    defaultDescription: "Delete a saved bookmark by name.",
-  },
-  {
-    name: "get_node_tree",
-    defaultDescription:
-      "Get a node and its nested children from the local cache. Returns content in compact text format showing node names with child previews (max 3 children shown per node). Present output AS-IS without paraphrasing. 'AI Messages' nodes are filtered out.",
-  },
-  {
-    name: "create_node",
-    defaultDescription:
-      "Create a new node (bullet point) in Workflowy. The node will be added as a child of the specified parent.",
-  },
-  {
-    name: "update_node",
-    defaultDescription:
-      "Update an existing node's name, note, or completed status. Use this to edit content or mark tasks complete/incomplete.",
-  },
-  {
-    name: "delete_node",
-    defaultDescription:
-      "Permanently delete a node and all its children. Use with caution.",
-  },
-  {
-    name: "move_node",
-    defaultDescription: "Move a node to a different parent location.",
-  },
-  {
-    name: "search_nodes",
-    defaultDescription:
-      "Search Workflowy nodes by text. Returns matches with their path AND a preview of their children (first 5 children with their child counts).",
-  },
-  {
-    name: "sync_nodes",
-    defaultDescription:
-      "Sync all Workflowy nodes to local cache for searching. Rate limited to once per minute.",
-  },
-];
+// Default server instructions and tool definitions are imported from shared/constants.ts
 
 interface CacheStatus {
   cache_populated: boolean;
