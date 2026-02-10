@@ -1,14 +1,16 @@
 # Workflowy Local MCP
 
-A local MCP server that lets LLMs read and write to your Workflowy account.
+A desktop app that runs a local MCP server, letting LLMs read and write to your Workflowy account. Your API key stays on your machine.
 
 ## Features
 
-- **12 tools** for managing Workflowy nodes (create, update, delete, move, complete)
-- **Local cache** with fast full-text search across all your nodes
-- **Bookmarks** to save frequently-used node locations
-- **Customizable** tool descriptions to tune AI behavior
-- **Auto-sync** keeps cache fresh (syncs on startup if stale >1 hour)
+- **10 tools** for managing Workflowy nodes (create, update, delete, move, search, sync)
+- **Local SQLite cache** with fast full-text search across all your nodes
+- **Bookmarks** to save frequently-used node locations with context notes
+- **AI Instructions** — create an "AI Instructions" node in Workflowy to customize LLM behavior across sessions
+- **Sync-on-access** — reads auto-sync from the Workflowy API so data is always fresh
+- **Customizable** server instructions and tool descriptions to tune AI behavior
+- **MCP logging** — view server activity in the desktop app in real time
 - **Fully local** — your API key never leaves your machine
 
 ## Installation
@@ -33,27 +35,61 @@ A local MCP server that lets LLMs read and write to your Workflowy account.
 
 | Tool | Description |
 |------|-------------|
-| `save_bookmark` | Save a node ID with a friendly name |
-| `list_bookmarks` | List all saved bookmarks |
-| `delete_bookmark` | Delete a bookmark |
-| `get_node_tree` | Get a node and its nested children from the local cache |
-| `get_targets` | Get special locations (inbox, home) |
-| `create_node` | Create a new node |
-| `update_node` | Update a node's name or note |
-| `delete_node` | Delete a node and all its children |
-| `move_node` | Move a node to a new parent |
-| `set_completed` | Set a node's completed status (checked/unchecked) |
-| `search_nodes` | Search locally cached nodes by text |
-| `sync_nodes` | Sync all nodes to local cache (1 req/min rate limit) |
+| `list_bookmarks` | List all saved bookmarks and the user's custom AI instructions. Intended to be called at the start of every conversation. |
+| `save_bookmark` | Save a node ID with a friendly name and context notes for future sessions |
+| `delete_bookmark` | Delete a saved bookmark by name |
+| `get_node_tree` | Get a node and its nested children with configurable depth (1-10). Supports `compact` (markdown) and `json` output formats. Auto-syncs fresh data from the API. |
+| `create_node` | Create a new node. Supports multiline markdown to create entire nested structures in one call. Accepts special `parent_id` values: `inbox`, `home`, or `None` (top-level). |
+| `update_node` | Update a node's name, note, or completed status (checked/unchecked) |
+| `delete_node` | Permanently delete a node and all its children |
+| `move_node` | Move a node to a different parent. Accepts special `parent_id` values: `inbox`, `home`, or `None` (top-level). |
+| `search_nodes` | Search locally cached nodes by text. Returns results with breadcrumb paths and a preview of each result's children. |
+| `sync_nodes` | Full sync of all Workflowy nodes to local cache (rate limited to 1 request per minute) |
 
 ## How It Works
 
-The server maintains a local SQLite cache of all your Workflowy nodes for fast searching:
+The server maintains a local SQLite cache of all your Workflowy nodes:
 
-- **Auto-sync on startup**: If the cache is empty or stale (>1 hour), it syncs automatically
-- **Optimistic updates**: Create, update, delete, move, and complete operations update the cache immediately
-- **Full-text search**: `search_nodes` searches both node names and notes, returning results with breadcrumb paths
-- **Rate limiting**: The Workflowy API limits exports to 1 request per minute
+- **Auto-sync on startup**: If the cache is empty or stale (>1 hour), a background sync runs automatically
+- **Sync-on-access**: `get_node_tree` syncs the requested node's children (up to 2 levels deep) from the API before returning, so you always see fresh data
+- **Optimistic updates**: Write operations (create, update, delete, move) update the cache immediately, then sync in the background to confirm the change
+- **Full-text search**: `search_nodes` searches both node names and notes, returning results with breadcrumb paths and child previews
+- **Rate limiting**: The Workflowy `nodes-export` API is limited to 1 request per minute; individual node syncs are not rate-limited
+
+## Desktop App
+
+The Tauri-based desktop app provides a UI for configuration and monitoring:
+
+- **API Key** — enter and validate your Workflowy API key
+- **Tools** — customize server instructions and individual tool descriptions to tune AI behavior
+- **Setup** — copy-paste configuration snippets for Claude Code, Claude Desktop, and Cursor
+- **Bookmarks** — view, edit context, and delete saved bookmarks
+- **Cache** — view cache status and trigger a manual sync
+- **Logs** — view MCP server logs in real time (auto-refreshes every 3 seconds)
+
+## AI Instructions
+
+You can create a node called "AI Instructions" in Workflowy to set persistent preferences for how LLMs interact with your data. For example:
+
+- "Always add new tasks to my #inbox"
+- "Use checkboxes for tasks, not bullets"
+- "My calendar is under 'Daily Notes > 2025'"
+
+The LLM will search for this node, save it as a reserved `ai_instructions` bookmark, and automatically load it at the start of every conversation.
+
+## Data Storage
+
+All data is stored locally in the app data directory:
+
+| Platform | Path |
+|----------|------|
+| macOS | `~/Library/Application Support/com.workflowy.local-mcp/` |
+| Windows | `%APPDATA%\com.workflowy.local-mcp\` |
+| Linux | `~/.local/share/com.workflowy.local-mcp/` |
+
+Files stored: `config.json` (settings), `bookmarks.db` (SQLite database with bookmarks and node cache), `mcp-logs.json` (server logs).
+
+The API key can also be set via the `WORKFLOWY_API_KEY` environment variable instead of the app config.
 
 ## Building from Source
 
@@ -63,3 +99,5 @@ Requires Node.js 18+ and Rust.
 npm install
 npm run tauri build
 ```
+
+This runs the frontend build (`tsc && vite build`), bundles the MCP server with esbuild (`npm run build:mcp`), and packages everything into a Tauri desktop app.
