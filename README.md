@@ -1,6 +1,10 @@
 # Workflowy Local MCP
 
-A desktop app that runs a local MCP server, letting LLMs read and write to your Workflowy account. Your API key stays on your machine.
+A desktop app that gives AI assistants full read/write access to your Workflowy account with fast local search. Unlike simple API wrappers, it caches your entire outline in a local SQLite database with full-text search - so your AI can instantly search across hundreds of thousands of nodes without hitting API rate limits. Your API key never leaves your machine.
+
+### Why This Exists
+
+Workflowy's API has no search endpoint and a strict 1 request/minute rate limit on full exports. That makes direct API access painfully slow for AI assistants that need to explore your outline. This server solves that with local caching, instant full-text search, bookmarks with context, and AI-configurable instructions - all through a simple desktop app.
 
 ## Features
 
@@ -90,6 +94,13 @@ All data is stored locally in the app data directory:
 Files stored: `config.json` (settings), `bookmarks.db` (SQLite database with bookmarks and node cache), `mcp-logs.json` (server logs).
 
 The API key can also be set via the `WORKFLOWY_API_KEY` environment variable instead of the app config.
+
+## Works With
+
+- [Claude Desktop](https://claude.ai/download)
+- [Claude Code](https://github.com/anthropics/claude-code)
+- [Cursor](https://cursor.com)
+- Any application that supports the [Model Context Protocol](https://modelcontextprotocol.io)
 
 ## Building from Source
 
