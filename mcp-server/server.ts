@@ -1002,6 +1002,132 @@ async function validateWorkflowyToken(apiKey: string): Promise<void> {
   }
 }
 
+// LLM Doc API base URL
+const LLM_DOC_API_BASE = "https://beta.workflowy.com";
+
+// LLM Doc API: Read a node and its children
+// Returns tag-as-key JSON format
+async function llmDocRead(
+  apiKey: string,
+  nodeId: string,
+  depth: number = 3,
+): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  const url = `${LLM_DOC_API_BASE}/api/llm/doc/read/${encodeURIComponent(nodeId)}/?depth=${depth}`;
+
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!res.ok) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            { error: true, http_status: res.status, message: data },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  }
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(data, null, 2),
+      },
+    ],
+  };
+}
+
+// LLM Doc API: Edit nodes (insert, update, delete operations)
+interface LlmDocOperation {
+  op: "insert" | "update" | "delete";
+  under?: string; // For insert: parent tag or target (today, inbox, etc.)
+  items?: Array<{
+    n: string; // Name/text
+    l?: string; // Line type (todo, h1, h2, h3, bullets, code, quote)
+    x?: number; // Completion status (1 = complete, 0 = incomplete)
+    c?: unknown[]; // Children for nested structures
+  }>;
+  position?: "top" | "bottom"; // For insert
+  ref?: string; // For update/delete: tag of node to modify
+  to?: {
+    n?: string; // New name
+    l?: string; // New line type
+    x?: number; // New completion status
+  };
+}
+
+async function llmDocEdit(
+  apiKey: string,
+  root: string,
+  operations: LlmDocOperation[],
+): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  const url = `${LLM_DOC_API_BASE}/api/llm/doc/edit`;
+
+  const body = {
+    root,
+    operations,
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!res.ok) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            { error: true, http_status: res.status, message: data, request: body },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  }
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({ success: true, response: data }, null, 2),
+      },
+    ],
+  };
+}
+
 // Default tool definitions - descriptions imported from shared/constants.ts
 const defaultTools = [
   // This tool MUST be first - it's the entry point for every conversation
@@ -1024,7 +1150,7 @@ const defaultTools = [
         },
         node_id: {
           type: "string",
-          description: "The Workflowy node UUID to bookmark",
+          description: "The Workflowy node ID (12-hex tag or UUID) to bookmark",
         },
         context: {
           type: "string",
@@ -1046,105 +1172,102 @@ const defaultTools = [
       required: ["name"],
     },
   },
-  // Workflowy read tools
+  // LLM Doc API tools
   {
-    name: "get_node_tree",
-    description: toolDescriptions.get_node_tree,
+    name: "read_doc",
+    description: toolDescriptions.read_doc,
     inputSchema: {
       type: "object",
       properties: {
         node_id: {
           type: "string",
           description:
-            "The node UUID to retrieve, or 'None' for top-level nodes",
+            "The node to read: a 12-hex tag, full UUID, or special target ('today', 'tomorrow', 'next_week', 'inbox', 'None' for root)",
         },
         depth: {
           type: "number",
           description:
-            "How many levels of children to include (default: 2, max: 10)",
-        },
-        format: {
-          type: "string",
-          description:
-            "Output format: 'compact' (human-readable text, default) or 'json' (structured data)",
-        },
-      },
-      required: ["node_id"],
-    },
-  },
-  // Workflowy write tools
-  {
-    name: "create_node",
-    description: toolDescriptions.create_node,
-    inputSchema: {
-      type: "object",
-      properties: {
-        name: {
-          type: "string",
-          description:
-            "The text content. Separate siblings with blank lines (actual newlines, NOT literal \\\\n). Use markdown for structure (# h1, ## h2, - bullet, - [ ] todo, **bold**)",
-        },
-        parent_id: {
-          type: "string",
-          description:
-            "Where to create the node: 'inbox', 'home', 'None' for top-level, or a node UUID",
-        },
-        note: {
-          type: "string",
-          description: "Optional note/description for the node",
-        },
-        position: {
-          type: "string",
-          enum: ["top", "bottom"],
-          description: "Where to place the node: 'top' (default) or 'bottom'",
-        },
-      },
-      required: ["name", "parent_id"],
-    },
-  },
-  {
-    name: "update_node",
-    description: toolDescriptions.update_node,
-    inputSchema: {
-      type: "object",
-      properties: {
-        node_id: { type: "string", description: "The node UUID to update" },
-        name: { type: "string", description: "New name/text for the node" },
-        note: { type: "string", description: "New note for the node" },
-        completed: {
-          type: "boolean",
-          description:
-            "Set completed status: true to mark complete (checked), false to mark incomplete (unchecked)",
+            "How many levels of children to include (default: 3, max: 10)",
         },
       },
       required: ["node_id"],
     },
   },
   {
-    name: "delete_node",
-    description: toolDescriptions.delete_node,
+    name: "edit_doc",
+    description: toolDescriptions.edit_doc,
     inputSchema: {
       type: "object",
       properties: {
-        node_id: { type: "string", description: "The node UUID to delete" },
-      },
-      required: ["node_id"],
-    },
-  },
-  {
-    name: "move_node",
-    description: toolDescriptions.move_node,
-    inputSchema: {
-      type: "object",
-      properties: {
-        node_id: { type: "string", description: "The node UUID to move" },
-        parent_id: {
+        root: {
           type: "string",
           description:
-            "New parent: 'inbox', 'home', 'None' for top-level, or a node UUID",
+            "The subtree root: a tag from a prior read_doc, or a target like 'today', 'inbox', 'None'",
+        },
+        operations: {
+          type: "array",
+          description: "Array of operations to perform",
+          items: {
+            type: "object",
+            properties: {
+              op: {
+                type: "string",
+                enum: ["insert", "update", "delete"],
+                description: "Operation type",
+              },
+              under: {
+                type: "string",
+                description: "For insert: parent tag or target (today, inbox, etc.)",
+              },
+              items: {
+                type: "array",
+                description: "For insert: nodes to create",
+                items: {
+                  type: "object",
+                  properties: {
+                    n: { type: "string", description: "Name/text content" },
+                    l: {
+                      type: "string",
+                      enum: ["todo", "h1", "h2", "h3", "bullets", "code", "quote"],
+                      description: "Line type",
+                    },
+                    x: {
+                      type: "number",
+                      enum: [0, 1],
+                      description: "Completion status (1 = complete)",
+                    },
+                    c: {
+                      type: "array",
+                      description: "Children for nested structures",
+                    },
+                  },
+                  required: ["n"],
+                },
+              },
+              position: {
+                type: "string",
+                enum: ["top", "bottom"],
+                description: "For insert: where to place nodes (default: top)",
+              },
+              ref: {
+                type: "string",
+                description: "For update/delete: tag of node to modify",
+              },
+              to: {
+                type: "object",
+                description: "For update: new values",
+                properties: {
+                  n: { type: "string", description: "New name" },
+                  l: { type: "string", description: "New line type" },
+                  x: { type: "number", description: "New completion status" },
+                },
+              },
+            },
+            required: ["op"],
+          },
         },
       },
-      required: ["node_id", "parent_id"],
+      required: ["root", "operations"],
     },
   },
   // Cache and search tools
@@ -1318,9 +1441,9 @@ async function main() {
     switch (name) {
       // Bookmark operations
       case "save_bookmark": {
-        const name = args.name as string;
-        const nodeId = args.node_id as string;
-        const context = (args.context as string) || null;
+        const name = args?.name as string;
+        const nodeId = args?.node_id as string;
+        const context = (args?.context as string) || null;
 
         // Delete existing bookmark with same name if exists
         db.run("DELETE FROM bookmarks WHERE name = ?", [name]);
@@ -1388,7 +1511,7 @@ async function main() {
           response.user_instructions = aiInstructions;
         } else if (!aiInstructionsBookmark) {
           // No bookmark exists yet - tell LLM to search for it
-          response.action_required = "No 'ai_instructions' bookmark found. Search for a node named 'AI Instructions' in Workflowy using search_nodes. If found, read it with get_node_tree and save it as bookmark 'ai_instructions' for future sessions.";
+          response.action_required = "No 'ai_instructions' bookmark found. Search for a node named 'AI Instructions' in Workflowy using search_nodes. If found, read it with read_doc and save it as bookmark 'ai_instructions' for future sessions.";
         } else {
           // Bookmark exists but node is empty
           response.user_instructions = "(No custom instructions configured yet)";
@@ -1400,352 +1523,66 @@ async function main() {
       }
 
       case "delete_bookmark": {
+        const bookmarkName = args?.name as string;
         const before = db.exec(
           "SELECT COUNT(*) FROM bookmarks WHERE name = ?",
-          [args.name],
+          [bookmarkName],
         );
         const count =
           before.length > 0 ? (before[0].values[0][0] as number) : 0;
-        db.run("DELETE FROM bookmarks WHERE name = ?", [args.name]);
+        db.run("DELETE FROM bookmarks WHERE name = ?", [bookmarkName]);
         saveDb();
         if (count === 0) {
           return {
             content: [
-              { type: "text", text: `Bookmark "${args.name}" not found` },
+              { type: "text", text: `Bookmark "${bookmarkName}" not found` },
             ],
           };
         }
         return {
-          content: [{ type: "text", text: `Bookmark "${args.name}" deleted` }],
+          content: [{ type: "text", text: `Bookmark "${bookmarkName}" deleted` }],
         };
       }
 
-      // Local cache read operations
-      case "get_node_tree": {
-        // Auto-sync if cache is empty or stale
-        await ensureCacheFresh(apiKey, db);
+      // LLM Doc API operations
+      case "read_doc": {
+        const nodeId = args?.node_id as string;
+        const depth = Math.min(Math.max((args?.depth as number) ?? 3, 1), 10);
 
-        const nodeId = args.node_id as string;
-        const depth = Math.min(Math.max((args.depth as number) ?? 2, 1), 10);
-        const format = (args.format as string) ?? "compact"; // "compact" or "json"
-
-        // Sync children to match the requested depth (up to 2 levels to avoid too many API calls)
-        const syncParentId = nodeId === "None" ? null : nodeId;
+        writeMcpLog(`[read_doc] Reading node: ${nodeId}, depth: ${depth}`, "info");
         
-        // First level: sync immediate children
-        await syncNodeChildren(apiKey, db, syncParentId).catch(() => {});
-        
-        // Second level: if depth > 1, also sync grandchildren (children of immediate children)
-        // This ensures we have fresh data for the nodes we'll display
-        if (depth > 1) {
-          // Get the immediate children we just synced
-          const childrenResult = db.exec(
-            syncParentId === null 
-              ? "SELECT id FROM nodes WHERE parent_id IS NULL"
-              : "SELECT id FROM nodes WHERE parent_id = ?",
-            syncParentId === null ? [] : [syncParentId],
-          );
-          const childIds = childrenResult[0]?.values.map((row) => row[0] as string) || [];
-          
-          writeMcpLog(`[get_node_tree] Syncing ${childIds.length} grandchildren for depth=${depth}`, "info");
-          
-          // Sync each child's children sequentially to avoid SQLite concurrency issues
-          for (const childId of childIds) {
-            const result = await syncNodeChildren(apiKey, db, childId).catch((e) => ({ success: false, error: String(e) }));
-            // Verify what's in DB after sync
-            const verifyResult = db.exec(
-              "SELECT COUNT(*) as count FROM nodes WHERE parent_id = ?",
-              [childId],
-            );
-            const childCount = verifyResult[0]?.values[0]?.[0] ?? 0;
-            writeMcpLog(`[get_node_tree] Synced children of ${childId}: ${JSON.stringify(result)}, DB now has ${childCount} children`, "info");
-          }
-        }
+        return llmDocRead(apiKey, nodeId, depth);
+      }
 
-        // Check if cache exists
-        const countResult = db.exec("SELECT COUNT(*) FROM nodes");
-        const nodeCount = (countResult[0]?.values[0][0] as number) ?? 0;
+      case "edit_doc": {
+        const root = args?.root as string;
+        const operations = args?.operations as LlmDocOperation[];
 
-        if (nodeCount === 0) {
+        if (!root) {
           return {
             content: [
               {
                 type: "text",
-                text: "Error: Cache is empty. Run sync_nodes first.",
+                text: JSON.stringify({ error: "Missing required parameter: root" }, null, 2),
               },
             ],
           };
         }
 
-        // Nodes to exclude from display (should be in bookmarks instead)
-        const excludedNodes = ["AI Messages"];
-
-        if (nodeId === "None") {
-          // Get top-level nodes with children
-          const nodes = buildNodeTree(db, null, depth, 0, excludedNodes);
-          
-          if (format === "compact") {
-            const markdown = formatNodeTreeMarkdown(nodes);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: markdown || "(no nodes)",
-                },
-              ],
-            };
-          } else {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify(
-                    {
-                      parent_id: null,
-                      depth,
-                      children: nodes,
-                    },
-                    null,
-                    2,
-                  ),
-                },
-              ],
-            };
-          }
-        } else {
-          // Get specific node with children
-          const node = getNodeFromCache(db, nodeId);
-          if (!node) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Error: Node not found: ${nodeId}`,
-                },
-              ],
-            };
-          }
-
-          // Add children to the node
-          const children = buildNodeTree(db, nodeId, depth, 0, excludedNodes);
-          if (children.length > 0) {
-            node.children = children;
-          }
-
-          if (format === "compact") {
-            let output = `**${node.name}**`;
-            if (node.children_count > 0) {
-              output += ` (${node.children_count} children)`;
-            }
-            if (node.note) {
-              output += `\n\n> ${node.note}`;
-            }
-            if (children.length > 0) {
-              output += "\n\n" + formatNodeTreeMarkdown(children, 0);
-            } else if (node.children_count === 0) {
-              output += "\n\n(empty)";
-            }
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: output,
-                },
-              ],
-            };
-          } else {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify(node, null, 2),
-                },
-              ],
-            };
-          }
-        }
-      }
-
-      // Workflowy write operations
-      case "create_node": {
-        const body: Record<string, unknown> = {
-          name: args.name,
-          parent_id: args.parent_id,
-        };
-        if (args.note) body.note = args.note;
-        if (args.position) body.position = args.position;
-        const response = await workflowyRequest(
-          apiKey,
-          "/api/v1/nodes",
-          "POST",
-          body,
-        );
-
-        // Optimistically update cache if API succeeded
-        try {
-          const responseData = JSON.parse(response.content[0].text);
-          // API returns { ok: true, data: { item_id: "..." } }
-          const newNodeId = responseData.data?.item_id;
-          if (responseData.ok && newNodeId) {
-            updateNodeCache(db, "insert", {
-              id: newNodeId,
-              name: args.name as string,
-              note: (args.note as string) || "",
-              parent_id:
-                args.parent_id === "None" ? null : (args.parent_id as string),
-              completed: false,
-            });
-            
-            // Sync parent's children in background to get accurate state
-            const parentId = args.parent_id === "None" ? null : (args.parent_id as string);
-            syncNodeChildren(apiKey, db, parentId).catch(() => {
-              // Ignore sync errors
-            });
-          }
-        } catch {
-          // Ignore cache update errors - will be fixed on next sync
-        }
-
-        return response;
-      }
-
-      case "update_node": {
-        const nodeId = args.node_id as string;
-        const completed = args.completed as boolean | undefined;
-
-        // Handle name/note updates
-        const body: Record<string, unknown> = {};
-        if (args.name !== undefined) body.name = args.name;
-        if (args.note !== undefined) body.note = args.note;
-
-        let response: { content: Array<{ type: "text"; text: string }> } | null =
-          null;
-
-        // If there are name/note changes, update them first
-        if (Object.keys(body).length > 0) {
-          response = await workflowyRequest(
-            apiKey,
-            `/api/v1/nodes/${nodeId}`,
-            "POST",
-            body,
-          );
-        }
-
-        // Handle completed status change separately (uses different endpoint)
-        if (completed !== undefined) {
-          const endpoint = completed ? "complete" : "uncomplete";
-          const completedResponse = await workflowyRequest(
-            apiKey,
-            `/api/v1/nodes/${nodeId}/${endpoint}`,
-            "POST",
-          );
-          // If no previous response, use this one
-          if (!response) {
-            response = completedResponse;
-          }
-        }
-
-        // If no changes were requested, return an error
-        if (!response) {
+        if (!operations || !Array.isArray(operations) || operations.length === 0) {
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify(
-                  { error: "No changes specified. Provide name, note, or completed." },
-                  null,
-                  2,
-                ),
+                text: JSON.stringify({ error: "Missing or empty operations array" }, null, 2),
               },
             ],
           };
         }
 
-        // Optimistically update cache
-        try {
-          const responseData = JSON.parse(response.content[0].text);
-          if (responseData.ok) {
-            updateNodeCache(db, "update", {
-              id: nodeId,
-              name: args.name as string | undefined,
-              note: args.note as string | undefined,
-              completed,
-            });
-            
-            // Sync the updated node in background to get accurate state
-            syncSingleNode(apiKey, db, nodeId).catch(() => {
-              // Ignore sync errors
-            });
-          }
-        } catch {
-          // Ignore cache update errors
-        }
-
-        return response;
-      }
-
-      case "delete_node": {
-        // Get the parent_id before deletion so we can sync parent's children after
-        const nodeToDelete = getNodeFromCache(db, args.node_id as string);
-        const parentId = nodeToDelete?.parent_id || null;
+        writeMcpLog(`[edit_doc] Editing root: ${root}, operations: ${JSON.stringify(operations)}`, "info");
         
-        const response = await workflowyRequest(
-          apiKey,
-          `/api/v1/nodes/${args.node_id}`,
-          "DELETE",
-        );
-
-        // Optimistically update cache (delete node and children)
-        try {
-          const responseData = JSON.parse(response.content[0].text);
-          if (responseData.ok) {
-            updateNodeCache(db, "delete", { id: args.node_id as string });
-            
-            // Sync parent's children in background to confirm deletion
-            syncNodeChildren(apiKey, db, parentId).catch(() => {
-              // Ignore sync errors
-            });
-          }
-        } catch {
-          // Ignore cache update errors
-        }
-
-        return response;
-      }
-
-      case "move_node": {
-        // Get the old parent_id before move so we can sync both old and new parent
-        const nodeToMove = getNodeFromCache(db, args.node_id as string);
-        const oldParentId = nodeToMove?.parent_id || null;
-        const newParentId = args.parent_id === "None" ? null : (args.parent_id as string);
-        
-        const response = await workflowyRequest(
-          apiKey,
-          `/api/v1/nodes/${args.node_id}/move`,
-          "POST",
-          {
-            parent_id: args.parent_id,
-          },
-        );
-
-        // Optimistically update cache
-        try {
-          const responseData = JSON.parse(response.content[0].text);
-          if (responseData.ok) {
-            updateNodeCache(db, "update", {
-              id: args.node_id as string,
-              parent_id: newParentId,
-            });
-            
-            // Sync both old and new parent's children in background
-            syncNodeChildren(apiKey, db, oldParentId).catch(() => {});
-            syncNodeChildren(apiKey, db, newParentId).catch(() => {});
-          }
-        } catch {
-          // Ignore cache update errors
-        }
-
-        return response;
+        return llmDocEdit(apiKey, root, operations);
       }
 
       // Cache and search operations
@@ -1753,9 +1590,9 @@ async function main() {
         // Auto-sync if cache is empty or stale
         await ensureCacheFresh(apiKey, db);
 
-        const query = args.query as string;
-        const includeCompleted = (args.include_completed as boolean) ?? false;
-        const limit = Math.min((args.limit as number) ?? 5, 100);
+        const query = args?.query as string;
+        const includeCompleted = (args?.include_completed as boolean) ?? false;
+        const limit = Math.min((args?.limit as number) ?? 5, 100);
 
         // Check if cache exists
         const countResult = db.exec("SELECT COUNT(*) FROM nodes");

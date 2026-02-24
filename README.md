@@ -8,7 +8,7 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 
 ## Features
 
-- **10 tools** for managing Workflowy nodes (create, update, delete, move, search, sync)
+- **7 tools** for managing Workflowy nodes (read, edit, search, sync, bookmarks)
 - **Local SQLite cache** with fast full-text search across all your nodes
 - **Bookmarks** to save frequently-used node locations with context notes
 - **AI Instructions** — create an "AI Instructions" node in Workflowy to customize LLM behavior across sessions
@@ -39,26 +39,23 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 
 | Tool | Description |
 |------|-------------|
-| `list_bookmarks` | List all saved bookmarks and the user's custom AI instructions. Intended to be called at the start of every conversation. |
+| `list_bookmarks` | List all saved bookmarks and the user's custom AI instructions. **Call this at the start of every conversation.** |
 | `save_bookmark` | Save a node ID with a friendly name and context notes for future sessions |
 | `delete_bookmark` | Delete a saved bookmark by name |
-| `get_node_tree` | Get a node and its nested children with configurable depth (1-10). Supports `compact` (markdown) and `json` output formats. Auto-syncs fresh data from the API. |
-| `create_node` | Create a new node. Supports multiline markdown to create entire nested structures in one call. Accepts special `parent_id` values: `inbox`, `home`, or `None` (top-level). |
-| `update_node` | Update a node's name, note, or completed status (checked/unchecked) |
-| `delete_node` | Permanently delete a node and all its children |
-| `move_node` | Move a node to a different parent. Accepts special `parent_id` values: `inbox`, `home`, or `None` (top-level). |
+| `read_doc` | Read a node and its children via the LLM Doc API. Supports calendar targets (`today`, `tomorrow`, `next_week`, `inbox`) and configurable depth (1-10). Returns tag-as-key JSON format. |
+| `edit_doc` | Edit nodes via the LLM Doc API. Supports `insert`, `update`, and `delete` operations in a single call. Can create nested structures with one request. |
 | `search_nodes` | Search locally cached nodes by text. Returns results with breadcrumb paths and a preview of each result's children. |
 | `sync_nodes` | Full sync of all Workflowy nodes to local cache (rate limited to 1 request per minute) |
 
 ## How It Works
 
-The server maintains a local SQLite cache of all your Workflowy nodes:
+The server uses Workflowy's LLM Doc API for reads and writes, with a local SQLite cache for search:
 
-- **Auto-sync on startup**: If the cache is empty or stale (>1 hour), a background sync runs automatically
-- **Sync-on-access**: `get_node_tree` syncs the requested node's children (up to 2 levels deep) from the API before returning, so you always see fresh data
-- **Optimistic updates**: Write operations (create, update, delete, move) update the cache immediately, then sync in the background to confirm the change
-- **Full-text search**: `search_nodes` searches both node names and notes, returning results with breadcrumb paths and child previews
-- **Rate limiting**: The Workflowy `nodes-export` API is limited to 1 request per minute; individual node syncs are not rate-limited
+- **LLM Doc API**: `read_doc` and `edit_doc` call Workflowy's `/api/llm/doc/read/` and `/api/llm/doc/edit` endpoints directly for real-time access
+- **Calendar targets**: Use `today`, `tomorrow`, `next_week`, or `inbox` as node IDs — the API handles date resolution automatically
+- **Batch operations**: `edit_doc` can perform multiple insert/update/delete operations in a single API call
+- **Local cache for search**: `search_nodes` uses a SQLite cache that auto-syncs when stale (>1 hour)
+- **Rate limiting**: The Workflowy `nodes-export` API (used for cache sync) is limited to 1 request per minute; the LLM Doc API has no rate limit
 
 ## Desktop App
 
