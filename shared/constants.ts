@@ -3,6 +3,16 @@
 
 export const defaultServerInstructions = `This MCP server connects to a user's Workflowy account. Workflowy is an outliner app where notes are organized as nested bullet points (nodes).
 
+## STOP — Read This First
+
+**Before making ANY tool call, follow this checklist:**
+
+1. **Call list_bookmarks FIRST** — It returns saved locations (including the node IDs you need) AND the user's custom instructions. Skip this = wasted calls.
+
+2. **Decide format before fetching** — If you'll need node IDs (to create children, move, update, or delete), use \`format: 'json'\` with sufficient depth. Never fetch 'compact' first then re-fetch for IDs.
+
+3. **One call, not many** — Use multiline markdown in create_node to build entire structures. Use get_node_tree with adequate depth rather than multiple shallow calls.
+
 ## Key Concepts
 - Nodes have a UUID (id), name (text content), and optional note (description)
 - Nodes can be nested infinitely under other nodes (parent_id)
@@ -81,9 +91,10 @@ The context field is for YOU to write notes about:
 2. If yes: get_node_tree with that node_id → Present output as-is
 3. If no: search_nodes("tasks") → Use children_preview to pick the right result → Save bookmark for next time
 
-**Creating new content (IMPORTANT - use multiline markdown):**
-1. list_bookmarks to find the right parent location
-2. Use ONE create_node call with multiline markdown to create entire structures:
+**Creating new content (IMPORTANT - minimize calls):**
+1. **list_bookmarks FIRST** — Check if the target location is already bookmarked (it often is!)
+2. If not bookmarked, use get_node_tree with \`format: 'json'\` to find the parent ID in ONE call
+3. Use ONE create_node call with multiline markdown to create entire structures:
 
 \`\`\`
 create_node(
@@ -133,6 +144,16 @@ The AI Instructions node can contain preferences like:
 
 If the user asks you to update their AI instructions, find the node and use update_node or create child nodes as needed.
 
+## Common Mistakes to Avoid
+
+❌ **Skipping list_bookmarks** — The bookmark you need probably already exists. Calling search or get_node_tree first wastes calls.
+
+❌ **Multiple get_node_tree calls with increasing depth** — Decide upfront what depth you need. One call with depth 4-5 beats three calls with depth 2, 3, then 4.
+
+❌ **Fetching 'compact' then 'json'** — If you'll need IDs, request 'json' format from the start.
+
+❌ **Multiple create_node calls** — Use multiline markdown to create entire structures in one call.
+
 ## Tips
 - **ALWAYS UPDATE, NEVER DUPLICATE**: When adding to existing structures (dates, projects, lists), search first and add to the existing node rather than creating a new one
 - **EFFICIENCY**: Use multiline markdown in create_node to add multiple items in one call
@@ -147,10 +168,12 @@ export const toolDescriptions = {
   list_bookmarks: `**START EVERY CONVERSATION BY CALLING THIS TOOL.** This returns saved Workflowy locations AND the user's custom AI instructions.
 
 The response contains:
-- bookmarks: Saved node locations with context notes
+- bookmarks: Saved node locations with context notes (including node IDs — use these instead of searching!)
 - user_instructions: The user's custom preferences (if they have an 'ai_instructions' bookmark)
 
-IMPORTANT: If user_instructions exists in the response, follow those preferences for the entire conversation. These are the user's personal instructions for how you should interact with their Workflowy.`,
+**WHY THIS MATTERS:** Bookmarks contain node IDs. If the user asks about "the log" or "my inbox" and a bookmark exists, you already have the ID — no need to call search_nodes or get_node_tree to find it.
+
+IMPORTANT: If user_instructions exists in the response, follow those preferences for the entire conversation.`,
 
   save_bookmark:
     "Save a Workflowy node with a name and context notes. The context field is for YOU (the LLM) to write notes about what this node contains and how to use it in future sessions. Check similar bookmarks before creating a new one to avoid duplicates.",
@@ -158,7 +181,7 @@ IMPORTANT: If user_instructions exists in the response, follow those preferences
   delete_bookmark: "Delete a saved bookmark by name.",
 
   get_node_tree:
-    "Get a node and its nested children. Returns markdown with items showing '(N children)' when they have nested content. Show this to the user so they know which items can be expanded further.\n\n**IMPORTANT:** If the user's task involves moving, updating, or deleting items, use `format: 'json'` to get node IDs in one call. Don't fetch compact first then search for IDs separately.",
+    "Get a node and its nested children. Returns markdown with items showing '(N children)' when they have nested content.\n\n**BEFORE CALLING:** Decide what you need:\n- Just displaying to user? → format: 'compact'\n- Need node IDs (to create children, move, update, delete)? → format: 'json'\n\n**NEVER** fetch with 'compact' then re-fetch with 'json'. Pick the right format and depth ONCE.",
 
   create_node: `Create a new node in Workflowy. SUPPORTS MARKDOWN for creating multiple nested nodes in ONE call.
 
