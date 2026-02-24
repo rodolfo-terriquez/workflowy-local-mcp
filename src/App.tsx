@@ -3,6 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 import { defaultServerInstructions, defaultTools } from "../shared/constants";
 
+// Current app version - update this when releasing new versions
+const APP_VERSION = "1.2.0";
+const GITHUB_REPO = "rodolfo-terriquez/workflowy-local-mcp";
+
 interface LogEntry {
   id: number;
   message: string;
@@ -75,9 +79,17 @@ function App() {
   // MCP logs state
   const [mcpLogs, setMcpLogs] = useState<LogEntry[]>([]);
 
+  // Update check state
+  const [updateAvailable, setUpdateAvailable] = useState<{
+    version: string;
+    url: string;
+  } | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+
   useEffect(() => {
     loadConfig();
     loadServerPath();
+    checkForUpdates();
   }, []);
 
   // Countdown timer for sync cooldown
@@ -182,6 +194,61 @@ function App() {
       setMcpLogs(convertedLogs);
     } catch (e) {
       console.error("Failed to load MCP logs:", e);
+    }
+  };
+
+  const checkForUpdates = async () => {
+    try {
+      const { fetch } = await import("@tauri-apps/plugin-http");
+      const response = await fetch(
+        `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
+        {
+          method: "GET",
+          headers: {
+            Accept: "application/vnd.github.v3+json",
+          },
+        }
+      );
+
+      if (!response.ok) {
+        console.log("Could not check for updates:", response.status);
+        return;
+      }
+
+      const release = await response.json();
+      const latestVersion = release.tag_name?.replace(/^v/, "") || "";
+      
+      // Compare versions (simple string comparison works for semver)
+      if (latestVersion && compareVersions(latestVersion, APP_VERSION) > 0) {
+        setUpdateAvailable({
+          version: latestVersion,
+          url: release.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`,
+        });
+      }
+    } catch (e) {
+      // Silently fail - update check is not critical
+      console.log("Update check failed:", e);
+    }
+  };
+
+  // Compare semver versions: returns 1 if a > b, -1 if a < b, 0 if equal
+  const compareVersions = (a: string, b: string): number => {
+    const partsA = a.split(".").map(Number);
+    const partsB = b.split(".").map(Number);
+    
+    for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+      const numA = partsA[i] || 0;
+      const numB = partsB[i] || 0;
+      if (numA > numB) return 1;
+      if (numA < numB) return -1;
+    }
+    return 0;
+  };
+
+  const openReleasePage = async () => {
+    if (updateAvailable?.url) {
+      const opener = await import("@tauri-apps/plugin-opener");
+      await opener.openUrl(updateAvailable.url);
     }
   };
 
@@ -681,7 +748,27 @@ function App() {
           </div>
         </div>
         <div className="sidebar-footer">
-          <span className="version">v1.1.0</span>
+          {updateAvailable && !updateDismissed && (
+            <div className="update-banner">
+              <span>v{updateAvailable.version} available</span>
+              <div className="update-actions">
+                <button 
+                  className="update-link" 
+                  onClick={openReleasePage}
+                >
+                  Download
+                </button>
+                <button 
+                  className="update-dismiss" 
+                  onClick={() => setUpdateDismissed(true)}
+                  title="Dismiss"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          )}
+          <span className="version">v{APP_VERSION}</span>
         </div>
       </div>
 

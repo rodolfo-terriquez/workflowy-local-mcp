@@ -54,6 +54,56 @@ body {
     color: #555;
 }
 
+.update-banner {
+    background: rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    font-size: 12px;
+}
+
+.update-banner span {
+    color: #a5a8fc;
+    font-weight: 500;
+}
+
+.update-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.update-link {
+    background: #6366f1;
+    color: white;
+    border: none;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.update-link:hover {
+    background: #5558e3;
+}
+
+.update-dismiss {
+    background: transparent;
+    color: #888;
+    border: none;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+}
+
+.update-dismiss:hover {
+    color: #e0e0e0;
+}
+
 .nav-item {
     display: flex;
     align-items: center;
