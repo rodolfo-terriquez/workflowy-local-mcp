@@ -4,7 +4,7 @@ import "./App.css";
 import { defaultServerInstructions, defaultTools } from "../shared/constants";
 
 // Current app version - update this when releasing new versions
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.2.1";
 const GITHUB_REPO = "rodolfo-terriquez/workflowy-local-mcp";
 
 interface LogEntry {
