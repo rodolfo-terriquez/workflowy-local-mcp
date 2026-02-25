@@ -380,23 +380,43 @@ async function performFullSync(
     };
   }
 
-  // Check if sync already in progress
+  // Check if sync already in progress (with stale lock detection)
   const inProgressResult = db.exec(
     "SELECT value FROM sync_meta WHERE key = 'sync_in_progress'",
   );
+  const syncStartResult = db.exec(
+    "SELECT value FROM sync_meta WHERE key = 'sync_started_at'",
+  );
+  
   if (
     inProgressResult.length > 0 &&
     inProgressResult[0].values[0][0] === "true"
   ) {
-    return {
-      success: false,
-      error: "Sync already in progress.",
-    };
+    // Check if the lock is stale (>5 minutes old)
+    const syncStartedAt = syncStartResult[0]?.values[0]?.[0] as string | undefined;
+    if (syncStartedAt) {
+      const startTime = new Date(syncStartedAt).getTime();
+      const elapsed = Date.now() - startTime;
+      const STALE_LOCK_MS = 5 * 60 * 1000; // 5 minutes
+      
+      if (elapsed < STALE_LOCK_MS) {
+        return {
+          success: false,
+          error: "Sync already in progress.",
+        };
+      }
+      // Lock is stale, clear it and proceed
+      writeMcpLog("Clearing stale sync lock (was stuck for >5 minutes)", "warning");
+    }
   }
 
-  // Mark sync in progress
+  // Mark sync in progress with timestamp
   db.run(
     "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('sync_in_progress', 'true')",
+  );
+  db.run(
+    "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('sync_started_at', ?)",
+    [new Date().toISOString()],
   );
   saveDb();
 
@@ -1733,6 +1753,21 @@ async function main() {
   try {
     const apiKey = getApiKey();
     const db = await getDb();
+
+    // Clear any stuck sync_in_progress flag from previous crashed sessions
+    const inProgressResult = db.exec(
+      "SELECT value FROM sync_meta WHERE key = 'sync_in_progress'",
+    );
+    if (
+      inProgressResult.length > 0 &&
+      inProgressResult[0].values[0][0] === "true"
+    ) {
+      writeMcpLog("Clearing stuck sync_in_progress flag from previous session", "warning");
+      db.run(
+        "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('sync_in_progress', 'false')",
+      );
+      saveDb();
+    }
 
     // Check last sync time
     const metaResult = db.exec(
