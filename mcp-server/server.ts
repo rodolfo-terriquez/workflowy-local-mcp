@@ -876,6 +876,135 @@ function formatNodeTreeMarkdown(
   return lines.join("\n");
 }
 
+// --- Fuzzy Search Helpers ---
+
+// Generate trigrams (3-character sliding windows) from a string
+function getTrigrams(s: string): Set<string> {
+  const trigrams = new Set<string>();
+  const normalized = s.toLowerCase();
+  // Pad with spaces so we also capture word boundaries
+  const padded = `  ${normalized}  `;
+  for (let i = 0; i < padded.length - 2; i++) {
+    trigrams.add(padded.substring(i, i + 3));
+  }
+  return trigrams;
+}
+
+// Compute trigram similarity between two strings (0 to 1)
+function trigramSimilarity(a: string, b: string): number {
+  const trigramsA = getTrigrams(a);
+  const trigramsB = getTrigrams(b);
+  if (trigramsA.size === 0 || trigramsB.size === 0) return 0;
+
+  let intersection = 0;
+  for (const t of trigramsA) {
+    if (trigramsB.has(t)) intersection++;
+  }
+
+  // Dice coefficient: 2 * |intersection| / (|A| + |B|)
+  return (2 * intersection) / (trigramsA.size + trigramsB.size);
+}
+
+// Tokenize text into words, stripping HTML tags and punctuation
+function tokenizeWords(text: string): string[] {
+  // Strip HTML tags
+  const stripped = text.replace(/<[^>]*>/g, " ");
+  // Split on non-alphanumeric, keep words of length > 0
+  return stripped.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 0);
+}
+
+// Check how well a query word matches a single text word
+// Returns 0 to 1: distinguishes exact word match, prefix, and substring-within-word
+function wordMatchScore(queryWord: string, textWord: string): number {
+  // Exact word match
+  if (queryWord === textWord) return 1.0;
+  // Query is a prefix of the text word (e.g. "double" matches "doubling")
+  if (textWord.startsWith(queryWord) && queryWord.length >= 3) return 0.9;
+  // Text word is a prefix of the query (e.g. "grocery" vs "grocer")
+  if (queryWord.startsWith(textWord) && textWord.length >= 3) return 0.8;
+  // Substring within a larger word (e.g. "body" in "somebody") — penalize heavily
+  if (textWord.includes(queryWord) && queryWord.length >= 3) return 0.3;
+  // Trigram similarity for typo tolerance
+  const sim = trigramSimilarity(queryWord, textWord);
+  return sim >= 0.4 ? sim * 0.7 : 0; // Scale down trigram matches slightly
+}
+
+// Find the best match score for a query word against all text words
+function bestWordMatch(queryWord: string, textWords: string[]): number {
+  let best = 0;
+  for (const tw of textWords) {
+    const s = wordMatchScore(queryWord, tw);
+    if (s > best) {
+      best = s;
+      if (best >= 1.0) break; // Can't do better than exact
+    }
+  }
+  return best;
+}
+
+// Score a candidate node against a search query
+// Returns a score from 0 (no match) to 1+ (perfect match)
+function scoreCandidate(
+  query: string,
+  queryWords: string[],
+  nodeName: string,
+  nodeNote: string,
+): number {
+  const nameLower = nodeName.toLowerCase();
+  const noteLower = nodeNote.toLowerCase();
+  // Strip HTML for matching
+  const nameStripped = nameLower.replace(/<[^>]*>/g, " ");
+  const noteStripped = noteLower.replace(/<[^>]*>/g, " ");
+  const combinedStripped = `${nameStripped} ${noteStripped}`;
+  const queryLower = query.toLowerCase();
+
+  const nameTokens = tokenizeWords(nodeName);
+  const noteTokens = tokenizeWords(nodeNote);
+  const allTokens = [...nameTokens, ...noteTokens];
+
+  // --- Component 1: Exact phrase match (strongest signal) ---
+  // Full query appears as a contiguous substring
+  const exactInName = nameStripped.includes(queryLower) ? 1.0 : 0;
+  const exactInNote = noteStripped.includes(queryLower) ? 0.8 : 0;
+  const exactMatch = Math.max(exactInName, exactInNote);
+
+  // --- Component 2: All-words-present match ---
+  // Every query word matches a word in the text (as whole word, prefix, or fuzzy)
+  let allWordsNameScore = 0;
+  let allWordsAllScore = 0;
+  if (queryWords.length > 0) {
+    let nameSum = 0;
+    let allSum = 0;
+    for (const qw of queryWords) {
+      nameSum += bestWordMatch(qw, nameTokens);
+      allSum += bestWordMatch(qw, allTokens);
+    }
+    allWordsNameScore = nameSum / queryWords.length;
+    allWordsAllScore = allSum / queryWords.length;
+  }
+
+  // --- Component 3: Trigram similarity of full query vs name ---
+  // Helps with reordering and heavy typos, but only on shorter text
+  // (long text dilutes the signal)
+  let trigramScore = 0;
+  if (nameTokens.length <= 15) {
+    trigramScore = trigramSimilarity(queryLower, nameStripped);
+  }
+
+  // --- Composite score ---
+  // Heavily favor exact phrase match, then all-words-in-name, then all-words-anywhere
+  const score =
+    exactMatch * 0.45 +
+    allWordsNameScore * 0.30 +
+    allWordsAllScore * 0.10 +
+    trigramScore * 0.15;
+
+  return score;
+}
+
+// Minimum score threshold to include in results
+const FUZZY_SEARCH_THRESHOLD = 0.2;
+
 // Get a single node by ID from local cache
 function getNodeFromCache(db: Database, nodeId: string): NodeTree | null {
   const results = db.exec(
@@ -1636,60 +1765,160 @@ async function main() {
           };
         }
 
-        // Use LIKE for text search (sql.js doesn't support FTS5)
-        const searchPattern = `%${query.toUpperCase()}%`;
+        // --- Fuzzy search: Stage 1 - SQL pre-filtering ---
+        // Split query into words for independent matching
+        const queryWords = tokenizeWords(query);
         const completedFilter = includeCompleted ? "" : "AND completed = 0";
 
-        // Query using LIKE pattern matching
-        const results = db.exec(
+        // Three-pass strategy (results merged, deduplicated by node ID):
+        //
+        // Pass 1: EXACT PHRASE — full query as contiguous substring (no LIMIT)
+        //         These are guaranteed best matches; we never want to miss them.
+        //
+        // Pass 2: AND — all query words present as substrings (LIMIT 200)
+        //         Catches word reordering: "doubling body" finds "body doubling".
+        //         Moderate limit since AND is fairly selective.
+        //
+        // Pass 3: OR — any query word present (LIMIT 200)
+        //         Broadest net for single-word partial/fuzzy matches.
+        //         Capped to avoid pulling in too much noise.
+        //
+        // JS scoring then ranks and filters the merged candidates.
+
+        const seenIds = new Set<string>();
+        const mergedValues: (initSqlJs.SqlValue[])[] = [];
+        const columns = ["id", "name", "note", "parent_id", "completed", "children_count"];
+
+        function addResults(queryResult: initSqlJs.QueryExecResult[]): void {
+          if (queryResult.length > 0 && queryResult[0].values.length > 0) {
+            for (const row of queryResult[0].values) {
+              const id = row[0] as string;
+              if (!seenIds.has(id)) {
+                seenIds.add(id);
+                mergedValues.push(row);
+              }
+            }
+          }
+        }
+
+        // --- Pass 1: Exact phrase match (no LIMIT — these are the best matches) ---
+        const phrasePattern = `%${query.toUpperCase()}%`;
+        addResults(db.exec(
           `SELECT id, name, note, parent_id, completed, children_count
            FROM nodes
            WHERE (UPPER(name) LIKE ? OR UPPER(note) LIKE ?)
-           ${completedFilter}
-           LIMIT ?`,
-          [searchPattern, searchPattern, limit],
-        );
+           ${completedFilter}`,
+          [phrasePattern, phrasePattern],
+        ));
+
+        if (queryWords.length >= 2) {
+          // --- Pass 2: AND — all words present (LIMIT 200) ---
+          const andClauses: string[] = [];
+          const andParams: (string | number)[] = [];
+          for (const word of queryWords) {
+            const pattern = `%${word.toUpperCase()}%`;
+            andClauses.push("(UPPER(name) LIKE ? OR UPPER(note) LIKE ?)");
+            andParams.push(pattern, pattern);
+          }
+          andParams.push(200);
+
+          addResults(db.exec(
+            `SELECT id, name, note, parent_id, completed, children_count
+             FROM nodes
+             WHERE (${andClauses.join(" AND ")})
+             ${completedFilter}
+             LIMIT ?`,
+            andParams,
+          ));
+
+          // --- Pass 3: OR — any word present (LIMIT 200) ---
+          const orClauses: string[] = [];
+          const orParams: (string | number)[] = [];
+          for (const word of queryWords) {
+            const pattern = `%${word.toUpperCase()}%`;
+            orClauses.push("(UPPER(name) LIKE ? OR UPPER(note) LIKE ?)");
+            orParams.push(pattern, pattern);
+          }
+          orParams.push(200);
+
+          addResults(db.exec(
+            `SELECT id, name, note, parent_id, completed, children_count
+             FROM nodes
+             WHERE (${orClauses.join(" OR ")})
+             ${completedFilter}
+             LIMIT ?`,
+            orParams,
+          ));
+        }
+
+        const results: initSqlJs.QueryExecResult[] = mergedValues.length > 0
+          ? [{ columns, values: mergedValues }]
+          : [];
+
+        // --- Fuzzy search: Stage 2 - JS scoring and ranking ---
+        const scoredCandidates: Array<{
+          row: (string | number | null)[];
+          score: number;
+        }> = [];
+
+        if (results.length > 0 && results[0].values.length > 0) {
+          for (const row of results[0].values) {
+            const nodeName = (row[1] as string) || "";
+            const nodeNote = (row[2] as string) || "";
+            const score = scoreCandidate(query, queryWords, nodeName, nodeNote);
+
+            if (score >= FUZZY_SEARCH_THRESHOLD) {
+              scoredCandidates.push({ row, score });
+            }
+          }
+        }
+
+        // Sort by score descending (best matches first)
+        scoredCandidates.sort((a, b) => b.score - a.score);
+
+        // Take only the requested number of results
+        const topResults = scoredCandidates.slice(0, limit);
 
         // Build results with paths and child previews
-        const nodes =
-          results[0]?.values.map((row) => {
-            const nodeId = row[0] as string;
-            const childrenCount = (row[5] as number) || 0;
-            const nodePath = buildNodePath(db, nodeId);
+        const nodes = topResults.map(({ row, score }) => {
+          const nodeId = row[0] as string;
+          const childrenCount = (row[5] as number) || 0;
+          const nodePath = buildNodePath(db, nodeId);
 
-            // Get first 5 children as preview (ordered by priority)
-            let childrenPreview: Array<{
-              name: string;
-              children_count: number;
-            }> = [];
-            if (childrenCount > 0) {
-              const childResults = db.exec(
-                `SELECT name, children_count FROM nodes 
-                 WHERE parent_id = ? 
-                 ORDER BY priority 
-                 LIMIT 5`,
-                [nodeId],
-              );
-              if (childResults.length > 0 && childResults[0].values.length > 0) {
-                childrenPreview = childResults[0].values.map((childRow) => ({
-                  name: childRow[0] as string,
-                  children_count: (childRow[1] as number) || 0,
-                }));
-              }
+          // Get first 5 children as preview (ordered by priority)
+          let childrenPreview: Array<{
+            name: string;
+            children_count: number;
+          }> = [];
+          if (childrenCount > 0) {
+            const childResults = db.exec(
+              `SELECT name, children_count FROM nodes 
+               WHERE parent_id = ? 
+               ORDER BY priority 
+               LIMIT 5`,
+              [nodeId],
+            );
+            if (childResults.length > 0 && childResults[0].values.length > 0) {
+              childrenPreview = childResults[0].values.map((childRow) => ({
+                name: childRow[0] as string,
+                children_count: (childRow[1] as number) || 0,
+              }));
             }
+          }
 
-            return {
-              id: nodeId,
-              name: row[1],
-              note: row[2] || null,
-              parent_id: row[3] || null,
-              completed: row[4] === 1,
-              children_count: childrenCount,
-              children_preview: childrenPreview,
-              path: nodePath,
-              path_display: formatPathString(nodePath),
-            };
-          }) ?? [];
+          return {
+            id: nodeId,
+            name: row[1],
+            note: row[2] || null,
+            parent_id: row[3] || null,
+            completed: row[4] === 1,
+            children_count: childrenCount,
+            children_preview: childrenPreview,
+            path: nodePath,
+            path_display: formatPathString(nodePath),
+            relevance_score: Math.round(score * 100) / 100,
+          };
+        });
 
         // Get cache freshness
         const metaResult = db.exec(
