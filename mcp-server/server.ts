@@ -115,7 +115,8 @@ async function getDb(): Promise<Database> {
       children_count INTEGER DEFAULT 0,
       priority INTEGER DEFAULT 0,
       created_at TEXT,
-      updated_at TEXT
+      updated_at TEXT,
+      completed_at TEXT
     )
   `);
 
@@ -134,6 +135,9 @@ async function getDb(): Promise<Database> {
     }
     if (!columns.includes("updated_at")) {
       dbInstance.run("ALTER TABLE nodes ADD COLUMN updated_at TEXT");
+    }
+    if (!columns.includes("completed_at")) {
+      dbInstance.run("ALTER TABLE nodes ADD COLUMN completed_at TEXT");
     }
   }
 
@@ -443,6 +447,7 @@ async function performFullSync(
         note?: string;
         parent_id?: string;
         completed?: boolean;
+        completedAt?: number | null;
         priority?: number;
         createdAt?: number;
         modifiedAt?: number;
@@ -469,7 +474,7 @@ async function performFullSync(
     for (const node of nodes) {
       const childrenCount = childrenCountMap.get(node.id) || 0;
       db.run(
-        "INSERT INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           node.id,
           node.name || "",
@@ -482,6 +487,7 @@ async function performFullSync(
           node.modifiedAt
             ? new Date(node.modifiedAt * 1000).toISOString()
             : null,
+          node.completedAt ? new Date(node.completedAt * 1000).toISOString() : null,
         ],
       );
     }
@@ -621,8 +627,8 @@ async function syncSingleNode(
     const childrenCount = (existingResult[0]?.values[0]?.[1] as number) ?? 0;
 
     db.run(
-      `INSERT OR REPLACE INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         node.id,
         node.name || "",
@@ -633,6 +639,7 @@ async function syncSingleNode(
         node.priority || 0,
         node.createdAt ? new Date(node.createdAt * 1000).toISOString() : null,
         node.modifiedAt ? new Date(node.modifiedAt * 1000).toISOString() : null,
+        node.completedAt ? new Date(node.completedAt * 1000).toISOString() : null,
       ],
     );
     saveDb();
@@ -718,8 +725,8 @@ async function syncNodeChildren(
       const childrenCount = (childCountResult[0]?.values[0]?.[0] as number) ?? 0;
 
       db.run(
-        `INSERT OR REPLACE INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           node.id,
           node.name || "",
@@ -730,6 +737,7 @@ async function syncNodeChildren(
           node.priority || 0,
           node.createdAt ? new Date(node.createdAt * 1000).toISOString() : null,
           node.modifiedAt ? new Date(node.modifiedAt * 1000).toISOString() : null,
+          node.completedAt ? new Date(node.completedAt * 1000).toISOString() : null,
         ],
       );
     }
@@ -1787,7 +1795,7 @@ async function main() {
 
         const seenIds = new Set<string>();
         const mergedValues: (initSqlJs.SqlValue[])[] = [];
-        const columns = ["id", "name", "note", "parent_id", "completed", "children_count"];
+        const columns = ["id", "name", "note", "parent_id", "completed", "children_count", "created_at", "updated_at", "completed_at"];
 
         function addResults(queryResult: initSqlJs.QueryExecResult[]): void {
           if (queryResult.length > 0 && queryResult[0].values.length > 0) {
@@ -1804,7 +1812,7 @@ async function main() {
         // --- Pass 1: Exact phrase match (no LIMIT — these are the best matches) ---
         const phrasePattern = `%${query.toUpperCase()}%`;
         addResults(db.exec(
-          `SELECT id, name, note, parent_id, completed, children_count
+          `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at
            FROM nodes
            WHERE (UPPER(name) LIKE ? OR UPPER(note) LIKE ?)
            ${completedFilter}`,
@@ -1823,7 +1831,7 @@ async function main() {
           andParams.push(200);
 
           addResults(db.exec(
-            `SELECT id, name, note, parent_id, completed, children_count
+            `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at
              FROM nodes
              WHERE (${andClauses.join(" AND ")})
              ${completedFilter}
@@ -1842,7 +1850,7 @@ async function main() {
           orParams.push(200);
 
           addResults(db.exec(
-            `SELECT id, name, note, parent_id, completed, children_count
+            `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at
              FROM nodes
              WHERE (${orClauses.join(" OR ")})
              ${completedFilter}
@@ -1917,6 +1925,9 @@ async function main() {
             path: nodePath,
             path_display: formatPathString(nodePath),
             relevance_score: Math.round(score * 100) / 100,
+            created_at: row[6] || null,
+            modified_at: row[7] || null,
+            completed_at: row[8] || null,
           };
         });
 
