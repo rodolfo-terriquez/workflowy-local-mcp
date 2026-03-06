@@ -1,10 +1,9 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import "./App.css";
 import { defaultServerInstructions, defaultTools } from "../shared/constants";
 
-// Current app version - update this when releasing new versions
-const APP_VERSION = "1.2.1";
 const GITHUB_REPO = "rodolfo-terriquez/workflowy-local-mcp";
 
 interface LogEntry {
@@ -85,12 +84,28 @@ function App() {
     url: string;
   } | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
 
   useEffect(() => {
     loadConfig();
     loadServerPath();
-    checkForUpdates();
+    void loadAppVersion();
   }, []);
+
+  useEffect(() => {
+    if (!appVersion) return;
+    void checkForUpdates(appVersion);
+  }, [appVersion]);
+
+  const loadAppVersion = async () => {
+    try {
+      const version = await getVersion();
+      setAppVersion(version);
+    } catch (e) {
+      // Silently fail - update check/version label are non-critical
+      console.log("Could not get app version:", e);
+    }
+  };
 
   // Countdown timer for sync cooldown
   useEffect(() => {
@@ -197,7 +212,7 @@ function App() {
     }
   };
 
-  const checkForUpdates = async () => {
+  const checkForUpdates = async (currentVersion: string) => {
     try {
       const { fetch } = await import("@tauri-apps/plugin-http");
       const response = await fetch(
@@ -219,7 +234,7 @@ function App() {
       const latestVersion = release.tag_name?.replace(/^v/, "") || "";
       
       // Compare versions (simple string comparison works for semver)
-      if (latestVersion && compareVersions(latestVersion, APP_VERSION) > 0) {
+      if (latestVersion && compareVersions(latestVersion, currentVersion) > 0) {
         setUpdateAvailable({
           version: latestVersion,
           url: release.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`,
@@ -768,7 +783,7 @@ function App() {
               </div>
             </div>
           )}
-          <span className="version">v{APP_VERSION}</span>
+          <span className="version">v{appVersion || "unknown"}</span>
         </div>
       </div>
 
