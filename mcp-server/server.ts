@@ -1331,7 +1331,7 @@ const defaultTools = [
         node_id: {
           type: "string",
           description:
-            "The node to read: a 12-hex tag, full UUID, or special target ('today', 'tomorrow', 'next_week', 'inbox', 'None' for root)",
+            "The node to read: a 12-hex tag, full UUID, or special target ('today', 'tomorrow', 'next_week', 'inbox', 'None' for root). If given a Workflowy link, use the 12-hex ID after '#/'",
         },
         depth: {
           type: "number",

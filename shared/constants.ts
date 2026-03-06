@@ -13,11 +13,14 @@ export const defaultServerInstructions = `This MCP server connects to a user's W
 
 3. **Calendar shortcuts** — Use \`today\`, \`tomorrow\`, \`next_week\`, or \`inbox\` as node_id values. No need to search for date nodes.
 
+4. **Workflowy links** — If user shares a link like \`https://beta.workflowy.com/#/b24b650a6b91\`, extract the 12-hex ID after \`#/\` and use that as \`node_id\`.
+
 ## Key Concepts
 - Nodes are identified by 12-character hex tags (e.g., "b605f0e85a4a")
 - Nodes can have: name (text), type (h1/h2/h3/todo/bullets/code/quote), completion status (x: 1 or 0)
 - Children are nested in the "c" array
 - Special targets: \`today\`, \`tomorrow\`, \`next_week\`, \`inbox\`, \`None\` (home/root)
+- Calendar IDs are also valid node IDs: \`YYYY\`, \`YYYY-MM\`, \`YYYY-MM-DD\`
 
 ## read_doc Response Format
 
@@ -39,6 +42,7 @@ The API returns tag-as-key JSON. Example:
 - \`l\` is the line type (todo, h1, h2, h3, bullets, code, quote)
 - \`x: 1\` means completed
 - \`+: 1\` means there are more children below the depth limit
+- Mirrors appear as \`{"<tag>": "Original Name", "m": "<original_short_id>", "c": [...]}\`: the \`m\` marker means this is a live mirror of another node, and the mirrored children are already included inline (no separate read needed)
 
 ## edit_doc Operations
 
@@ -125,10 +129,13 @@ search_nodes searches the local cache by text. Use it when you don't know where 
 
 ❌ **Editing without reading** — Update and delete require a prior read to populate the cache.
 
+❌ **Passing a full Workflowy URL to read_doc** — Extract the 12-hex ID after \`#/\` first.
+
 ## Tips
 - Use \`depth: 2-3\` for most reads; increase only if needed
 - The \`+: 1\` indicator means there's more content below the depth limit
 - Calendar targets (today, tomorrow, etc.) auto-create if they don't exist
+- If edit_doc returns a \`read_required\` error, run read_doc on the subtree and retry edit_doc
 - Bookmarks persist across sessions — save important locations`;
 
 // Tool descriptions - single source of truth for both MCP server and frontend
@@ -153,6 +160,8 @@ The response contains:
 - A 12-hex tag (e.g., "b605f0e85a4a") or full UUID
 - Special targets: "today", "tomorrow", "next_week", "inbox"
 - "None" for the root/home level
+- A Workflowy link (extract the 12-hex ID after \`#/\`)
+- Calendar IDs: "YYYY", "YYYY-MM", "YYYY-MM-DD"
 
 **Response format:**
 - First key-value is the node's tag and name
@@ -160,6 +169,7 @@ The response contains:
 - "l" is line type (todo, h1, h2, h3, bullets, code, quote)
 - "x": 1 means completed
 - "+": 1 means more children exist below depth limit
+- Mirrors appear as \`{"<tag>": "Original Name", "m": "<original_short_id>", "c": [...]}\`: the "m" marker means this is a live mirror of another node, and the mirrored children are already included inline (no separate read needed)
 - "ancestors" shows the path to root
 
 **IMPORTANT:** After reading, you can use the tags in edit_doc operations.`,
@@ -187,6 +197,11 @@ DELETE — Remove nodes (requires prior read_doc):
 - x: Completion status (1 = complete, 0 = incomplete)
 - c: Children array for nested structures
 
+**Behavior notes:**
+- Update/delete should follow a prior read_doc of the same subtree
+- If the API returns \`read_required\`, call read_doc for that root and retry
+- Insert can target a known parent tag or a system target such as "today" or "inbox"
+
 **Examples:**
 
 Add task to today:
@@ -199,7 +214,7 @@ Create nested structure:
 \`edit_doc(root="inbox", operations=[{"op": "insert", "under": "inbox", "items": [{"n": "Project", "l": "h2", "c": [{"n": "Task 1", "l": "todo"}, {"n": "Task 2", "l": "todo"}]}], "position": "top"}])\``,
 
   search_nodes:
-    "Search Workflowy nodes by text in the local cache. Returns matches with their path and a preview of children. Use the node_id from results with read_doc to get full content.",
+    "Search Workflowy nodes by text in the local cache. Returns matches with their path, child preview, and timestamps (created_at, modified_at, completed_at). Use the node_id from results with read_doc to get full content.",
 
   sync_nodes:
     "Sync all Workflowy nodes to local cache for searching. Rate limited to once per minute. The cache auto-syncs when stale (>1 hour).",
