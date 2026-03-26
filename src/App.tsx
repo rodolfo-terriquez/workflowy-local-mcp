@@ -40,6 +40,23 @@ interface CacheStatus {
   sync_cooldown_seconds: number;
 }
 
+interface BackupSnapshot {
+  id: string;
+  filename: string;
+  created_at: string;
+  backup_date: string;
+  node_count: number;
+  source: "daily" | "manual";
+  path: string;
+}
+
+interface AppConfig {
+  apiKey?: string;
+  serverDescription?: string;
+  toolDescriptions?: Record<string, string>;
+  maxBackups?: number;
+}
+
 function App() {
   const [apiKey, setApiKey] = useState("");
   const [savedApiKey, setSavedApiKey] = useState("");
@@ -52,7 +69,7 @@ function App() {
     "claude-code" | "claude-desktop" | "cursor"
   >("claude-code");
   const [activeSection, setActiveSection] = useState<
-    "general" | "api-key" | "tools" | "setup" | "bookmarks" | "cache"
+    "general" | "api-key" | "tools" | "setup" | "bookmarks" | "cache" | "backups"
   >("api-key");
 
   // Tool customization state
@@ -74,6 +91,12 @@ function App() {
   const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncCooldown, setSyncCooldown] = useState(0);
+  const [backups, setBackups] = useState<BackupSnapshot[]>([]);
+  const [backupsLoading, setBackupsLoading] = useState(false);
+  const [backupDirectory, setBackupDirectory] = useState("");
+  const [savedMaxBackups, setSavedMaxBackups] = useState<number | null>(null);
+  const [maxBackupsInput, setMaxBackupsInput] = useState("");
+  const [backupSettingsDirty, setBackupSettingsDirty] = useState(false);
 
   // MCP logs state
   const [mcpLogs, setMcpLogs] = useState<LogEntry[]>([]);
@@ -118,9 +141,15 @@ function App() {
   // Load cache status when cache section is active
   useEffect(() => {
     if (activeSection === "cache" && savedApiKey) {
-      loadCacheStatus();
+      void loadCacheStatus();
     }
   }, [activeSection, savedApiKey]);
+
+  useEffect(() => {
+    if (activeSection === "backups") {
+      void loadBackups();
+    }
+  }, [activeSection]);
 
   // Load MCP logs when logs section is active
   useEffect(() => {
@@ -209,6 +238,52 @@ function App() {
       setMcpLogs(convertedLogs);
     } catch (e) {
       console.error("Failed to load MCP logs:", e);
+    }
+  };
+
+  const loadBackups = async () => {
+    setBackupsLoading(true);
+
+    try {
+      const { join } = await import("@tauri-apps/api/path");
+      const { exists, readDir, readTextFile } = await import(
+        "@tauri-apps/plugin-fs"
+      );
+
+      const dataDir = await getDataDir();
+      const backupsDir = await join(dataDir, "backups");
+      setBackupDirectory(backupsDir);
+
+      if (!(await exists(backupsDir))) {
+        setBackups([]);
+        return;
+      }
+
+      const entries = await readDir(backupsDir);
+      const metadataFiles = entries.filter(
+        (entry) => entry.isFile && entry.name.endsWith(".meta.json"),
+      );
+
+      const snapshots = await Promise.all(
+        metadataFiles.map(async (entry) => {
+          const metadataPath = await join(backupsDir, entry.name);
+          const raw = await readTextFile(metadataPath);
+          const metadata = JSON.parse(raw) as Omit<BackupSnapshot, "path">;
+          return {
+            ...metadata,
+            path: await join(backupsDir, metadata.filename),
+          };
+        }),
+      );
+
+      snapshots.sort((a, b) => b.created_at.localeCompare(a.created_at));
+      setBackups(snapshots);
+    } catch (e) {
+      console.error("Failed to load backups:", e);
+      addLog(`Failed to load backups: ${e}`, "error");
+      setBackups([]);
+    } finally {
+      setBackupsLoading(false);
     }
   };
 
@@ -356,7 +431,7 @@ function App() {
       const { readTextFile, exists } = await import("@tauri-apps/plugin-fs");
       if (await exists(configPath)) {
         const content = await readTextFile(configPath);
-        const config = JSON.parse(content);
+        const config = JSON.parse(content) as AppConfig;
         if (config.apiKey) {
           setSavedApiKey(config.apiKey);
           setApiKey(config.apiKey);
@@ -368,6 +443,18 @@ function App() {
         if (config.toolDescriptions) {
           setToolDescriptions(config.toolDescriptions);
         }
+        if (
+          typeof config.maxBackups === "number" &&
+          Number.isInteger(config.maxBackups) &&
+          config.maxBackups > 0
+        ) {
+          setSavedMaxBackups(config.maxBackups);
+          setMaxBackupsInput(String(config.maxBackups));
+        } else {
+          setSavedMaxBackups(null);
+          setMaxBackupsInput("");
+        }
+        setBackupSettingsDirty(false);
       }
     } catch (e) {
       console.error("Error loading config:", e);
@@ -393,7 +480,7 @@ function App() {
     }
   };
 
-  const saveConfig = async (config: Record<string, unknown>) => {
+  const saveConfig = async (config: AppConfig) => {
     try {
       const { writeTextFile, mkdir, exists } = await import(
         "@tauri-apps/plugin-fs"
@@ -411,6 +498,81 @@ function App() {
     }
   };
 
+  const getFilteredToolDescriptions = (): Record<string, string> => {
+    const filteredDescriptions: Record<string, string> = {};
+    for (const [name, desc] of Object.entries(toolDescriptions)) {
+      if (desc.trim()) {
+        filteredDescriptions[name] = desc.trim();
+      }
+    }
+    return filteredDescriptions;
+  };
+
+  const buildConfig = (
+    overrides: Partial<AppConfig> = {},
+    options: { maxBackups?: number | null; includeApiKey?: boolean } = {},
+  ): AppConfig => {
+    const config: AppConfig = {};
+    const includeApiKey = options.includeApiKey ?? true;
+    const apiKeyToSave =
+      overrides.apiKey !== undefined ? overrides.apiKey : savedApiKey || undefined;
+
+    if (includeApiKey && apiKeyToSave) {
+      config.apiKey = apiKeyToSave;
+    }
+    if (serverDescription) {
+      config.serverDescription = serverDescription;
+    }
+
+    const filteredDescriptions = getFilteredToolDescriptions();
+    if (Object.keys(filteredDescriptions).length > 0) {
+      config.toolDescriptions = filteredDescriptions;
+    }
+
+    const maxBackupsToSave =
+      options.maxBackups !== undefined ? options.maxBackups : savedMaxBackups;
+    if (typeof maxBackupsToSave === "number" && maxBackupsToSave > 0) {
+      config.maxBackups = maxBackupsToSave;
+    }
+
+    return config;
+  };
+
+  const parseMaxBackupsInput = (): {
+    value: number | null;
+    error?: string;
+  } => {
+    const trimmed = maxBackupsInput.trim();
+    if (!trimmed) {
+      return { value: null };
+    }
+
+    const parsed = Number(trimmed);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      return { value: null, error: "Max backups must be a whole number greater than 0." };
+    }
+
+    return { value: parsed };
+  };
+
+  const pruneBackupsInApp = async (maxBackups: number | null) => {
+    if (maxBackups === null) {
+      return 0;
+    }
+
+    const { remove } = await import("@tauri-apps/plugin-fs");
+    const backupsToDelete = backups.slice(maxBackups);
+
+    await Promise.all(
+      backupsToDelete.map(async (backup) => {
+        await remove(backup.path);
+        await remove(backup.path.replace(/\.json$/, ".meta.json"));
+      }),
+    );
+
+    return backupsToDelete.length;
+  };
+
   const saveApiKey = async () => {
     if (!apiKey.trim()) {
       showToast("Please enter an API key", "error");
@@ -421,14 +583,9 @@ function App() {
       addLog("Validating API key...", "info");
       await invoke("validate_api_key", { apiKey: apiKey.trim() });
 
-      const config: Record<string, unknown> = { apiKey: apiKey.trim() };
-      if (serverDescription) config.serverDescription = serverDescription;
-      if (Object.keys(toolDescriptions).length > 0)
-        config.toolDescriptions = toolDescriptions;
+      await saveConfig(buildConfig({ apiKey: apiKey.trim() }));
 
-      await saveConfig(config);
-
-      setSavedApiKey(apiKey);
+      setSavedApiKey(apiKey.trim());
       addLog("API key validated and saved", "success");
       showToast("API key saved successfully", "success");
     } catch (e) {
@@ -439,22 +596,7 @@ function App() {
 
   const saveToolCustomizations = async () => {
     try {
-      const config: Record<string, unknown> = {};
-      if (savedApiKey) config.apiKey = savedApiKey;
-      if (serverDescription) config.serverDescription = serverDescription;
-
-      // Only save non-empty custom descriptions
-      const filteredDescriptions: Record<string, string> = {};
-      for (const [name, desc] of Object.entries(toolDescriptions)) {
-        if (desc.trim()) {
-          filteredDescriptions[name] = desc.trim();
-        }
-      }
-      if (Object.keys(filteredDescriptions).length > 0) {
-        config.toolDescriptions = filteredDescriptions;
-      }
-
-      await saveConfig(config);
+      await saveConfig(buildConfig());
       setHasUnsavedChanges(false);
       addLog("Tool customizations saved", "success");
       showToast(
@@ -568,21 +710,7 @@ function App() {
 
   const clearApiKey = async () => {
     try {
-      const config: Record<string, unknown> = {};
-      if (serverDescription) config.serverDescription = serverDescription;
-
-      // Keep tool customizations
-      const filteredDescriptions: Record<string, string> = {};
-      for (const [name, desc] of Object.entries(toolDescriptions)) {
-        if (desc.trim()) {
-          filteredDescriptions[name] = desc.trim();
-        }
-      }
-      if (Object.keys(filteredDescriptions).length > 0) {
-        config.toolDescriptions = filteredDescriptions;
-      }
-
-      await saveConfig(config);
+      await saveConfig(buildConfig({}, { includeApiKey: false }));
       setApiKey("");
       setSavedApiKey("");
       addLog("API key cleared", "info");
@@ -626,6 +754,61 @@ function App() {
   const showToast = (message: string, type: "success" | "error") => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
+  };
+
+  const openBackupsFolder = async () => {
+    if (!backupDirectory) return;
+
+    try {
+      const { openPath } = await import("@tauri-apps/plugin-opener");
+      await openPath(backupDirectory);
+    } catch (e) {
+      console.error("Failed to open backups folder:", e);
+      showToast("Failed to open backups folder", "error");
+    }
+  };
+
+  const saveBackupSettings = async () => {
+    const parsed = parseMaxBackupsInput();
+    if (parsed.error) {
+      showToast(parsed.error, "error");
+      return;
+    }
+
+    try {
+      await saveConfig(buildConfig({}, { maxBackups: parsed.value }));
+      setSavedMaxBackups(parsed.value);
+
+      const deletedCount = await pruneBackupsInApp(parsed.value);
+      await loadBackups();
+
+      setBackupSettingsDirty(false);
+      addLog(
+        parsed.value === null
+          ? "Backup retention cleared; all backups will be kept."
+          : `Backup retention set to ${parsed.value} snapshot${parsed.value === 1 ? "" : "s"}.`,
+        "success",
+      );
+      showToast(
+        deletedCount > 0
+          ? `Backup setting saved. Removed ${deletedCount} old backup${deletedCount === 1 ? "" : "s"}.`
+          : "Backup settings saved",
+        "success",
+      );
+    } catch (e) {
+      console.error("Failed to save backup settings:", e);
+      showToast("Failed to save backup settings", "error");
+    }
+  };
+
+  const revealBackupInFolder = async (backupPath: string) => {
+    try {
+      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+      await revealItemInDir(backupPath);
+    } catch (e) {
+      console.error("Failed to reveal backup:", e);
+      showToast("Failed to reveal backup file", "error");
+    }
   };
 
   const copyConfig = (config: string) => {
@@ -754,6 +937,12 @@ function App() {
             onClick={() => setActiveSection("cache")}
           >
             <span>Cache</span>
+          </div>
+          <div
+            className={`nav-item ${activeSection === "backups" ? "active" : ""}`}
+            onClick={() => setActiveSection("backups")}
+          >
+            <span>Backups</span>
           </div>
           <div
             className={`nav-item ${activeSection === "general" ? "active" : ""}`}
@@ -1148,7 +1337,9 @@ function App() {
                     key first to use cache features.
                   </p>
                 </div>
-              ) : (
+              ) : null}
+
+              {savedApiKey ? (
                 <>
                   <div className="cache-status">
                     <h3>Cache Status</h3>
@@ -1216,7 +1407,10 @@ function App() {
                     </button>
                     <button
                       className="button button-secondary"
-                      onClick={loadCacheStatus}
+                      onClick={() => {
+                        void loadCacheStatus();
+                        void loadBackups();
+                      }}
                     >
                       Refresh Status
                     </button>
@@ -1233,9 +1427,178 @@ function App() {
                       <strong>Rate Limit:</strong> The Workflowy API limits
                       export requests to 1 per minute.
                     </p>
+                    <p style={{ marginTop: "8px" }}>
+                      <strong>Backups:</strong> Daily snapshots are available in
+                      the <code>Backups</code> tab.
+                    </p>
                   </div>
                 </>
-              )}
+              ) : null}
+            </>
+          )}
+
+          {/* Backups Section */}
+          {activeSection === "backups" && (
+            <>
+              <div className="header">
+                <h1>Backups</h1>
+                <p>
+                  Daily full-account Workflowy export snapshots stored locally
+                  by the MCP server.
+                </p>
+              </div>
+
+              <div className="cache-status">
+                <h3>Retention</h3>
+                <p className="section-hint">
+                  Set how many backups to keep. Leave this blank to keep all
+                  backups indefinitely.
+                </p>
+
+                <div className="backup-retention-row">
+                  <div className="input-group backup-retention-input">
+                    <label>Max Backups to Keep</label>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={maxBackupsInput}
+                      onChange={(e) => {
+                        setMaxBackupsInput(e.target.value);
+                        setBackupSettingsDirty(true);
+                      }}
+                      placeholder="Keep all"
+                    />
+                  </div>
+                  <div className="backup-retention-actions">
+                    <button
+                      className={`button button-primary ${!backupSettingsDirty ? "button-disabled" : ""}`}
+                      onClick={saveBackupSettings}
+                      disabled={!backupSettingsDirty}
+                    >
+                      Save Retention
+                    </button>
+                    <button
+                      className="button button-secondary"
+                      onClick={() => {
+                        setMaxBackupsInput("");
+                        setBackupSettingsDirty(true);
+                      }}
+                    >
+                      Keep All
+                    </button>
+                  </div>
+                </div>
+
+                <p className="section-hint" style={{ marginBottom: 0 }}>
+                  Current setting:{" "}
+                  <strong>
+                    {savedMaxBackups === null
+                      ? "Keep all backups"
+                      : `Keep the latest ${savedMaxBackups} backup${savedMaxBackups === 1 ? "" : "s"}`}
+                  </strong>
+                </p>
+              </div>
+
+              <div className="cache-status">
+                <h3>Backup Overview</h3>
+                <p className="section-hint">
+                  The server stores one complete Workflowy export per day in the
+                  local app data folder. Use <code>list_backups</code>,{" "}
+                  <code>create_backup</code>, <code>restore_backup</code>, and{" "}
+                  <code>export_backup</code> from your MCP client for backup
+                  management.
+                </p>
+
+                <div className="status-grid">
+                  <div className="status-item">
+                    <span className="status-label">Stored Backups</span>
+                    <span className="status-value">{backups.length}</span>
+                  </div>
+                  <div className="status-item">
+                    <span className="status-label">Latest Backup</span>
+                    <span className="status-value">
+                      {backups.length > 0
+                        ? formatDate(backups[0].created_at)
+                        : "None yet"}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="backup-directory">
+                  <span className="status-label">Backup Folder</span>
+                  <code>{backupDirectory || "Loading..."}</code>
+                </div>
+
+                <div className="cache-actions">
+                  <button
+                    className="button button-secondary"
+                    onClick={openBackupsFolder}
+                    disabled={!backupDirectory}
+                  >
+                    Open Backup Folder
+                  </button>
+                  <button
+                    className="button button-secondary"
+                    onClick={() => void loadBackups()}
+                    disabled={backupsLoading}
+                  >
+                    {backupsLoading ? "Refreshing..." : "Refresh Backups"}
+                  </button>
+                </div>
+
+                {backupsLoading ? (
+                  <p>Loading backups...</p>
+                ) : backups.length === 0 ? (
+                  <div className="backup-empty">
+                    <p>No backup snapshots found yet.</p>
+                    <p className="section-hint">
+                      A daily backup is created when the MCP server runs. You
+                      can also trigger one with <code>create_backup</code>.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="backup-list">
+                    {backups.slice(0, 5).map((backup) => (
+                      <div key={backup.id} className="backup-card">
+                        <div className="backup-card-header">
+                          <div>
+                            <div className="backup-id">{backup.id}</div>
+                            <div className="backup-date">
+                              {formatDate(backup.created_at)}
+                            </div>
+                          </div>
+                          <span className={`backup-badge ${backup.source}`}>
+                            {backup.source}
+                          </span>
+                        </div>
+                        <div className="backup-meta">
+                          <span>{backup.node_count.toLocaleString()} nodes</span>
+                          <span>{backup.filename}</span>
+                        </div>
+                        <div className="backup-path">
+                          <code title={backup.path}>{backup.path}</code>
+                        </div>
+                        <div className="backup-actions">
+                          <button
+                            className="button button-secondary button-small"
+                            onClick={() => void revealBackupInFolder(backup.path)}
+                          >
+                            Reveal File
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {backups.length > 5 && (
+                  <p className="section-hint">
+                    Showing the 5 most recent backups. Use{" "}
+                    <code>list_backups</code> via MCP for the full list.
+                  </p>
+                )}
+              </div>
             </>
           )}
 

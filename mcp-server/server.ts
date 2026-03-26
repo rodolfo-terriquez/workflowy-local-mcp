@@ -19,6 +19,40 @@ interface Config {
   apiKey?: string;
   serverDescription?: string;
   toolDescriptions?: Record<string, string>;
+  maxBackups?: number;
+}
+
+interface WorkflowyExportNode {
+  id: string;
+  name?: string;
+  note?: string;
+  parent_id?: string;
+  completed?: boolean;
+  completedAt?: number | null;
+  priority?: number;
+  createdAt?: number;
+  modifiedAt?: number;
+}
+
+interface WorkflowyExportResponse {
+  nodes: WorkflowyExportNode[];
+}
+
+interface BackupSnapshotMetadata {
+  id: string;
+  filename: string;
+  created_at: string;
+  backup_date: string;
+  node_count: number;
+  source: "daily" | "manual";
+}
+
+interface BackupSnapshotRecord {
+  format: "workflowy-local-mcp-backup-v1";
+  created_at: string;
+  backup_date: string;
+  source: "daily" | "manual";
+  export: WorkflowyExportResponse;
 }
 
 // Get data directory - use app data folder
@@ -39,6 +73,18 @@ function getDataDir(): string {
   }
 }
 
+function ensureDirExists(dirPath: string): void {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
+}
+
+function getBackupsDir(): string {
+  const backupsDir = path.join(getDataDir(), "backups");
+  ensureDirExists(backupsDir);
+  return backupsDir;
+}
+
 // Load config from file
 function loadConfig(): Config {
   const dataDir = getDataDir();
@@ -54,6 +100,18 @@ function loadConfig(): Config {
   return {};
 }
 
+function getConfiguredMaxBackups(): number | null {
+  const config = loadConfig();
+  if (
+    typeof config.maxBackups === "number" &&
+    Number.isInteger(config.maxBackups) &&
+    config.maxBackups > 0
+  ) {
+    return config.maxBackups;
+  }
+  return null;
+}
+
 // Database singleton
 let dbInstance: Database | null = null;
 let SQL: initSqlJs.SqlJsStatic | null = null;
@@ -65,9 +123,7 @@ async function getDb(): Promise<Database> {
   }
 
   const dataDir = getDataDir();
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
+  ensureDirExists(dataDir);
 
   const dbPath = path.join(dataDir, "bookmarks.db");
 
@@ -239,6 +295,9 @@ const EXPORT_RATE_LIMIT_MS = 60000; // 1 minute
 // Stale threshold for cache (1 hour)
 const STALE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
 
+const BACKUP_FORMAT = "workflowy-local-mcp-backup-v1";
+const BACKUP_FILE_PREFIX = "workflowy-backup";
+
 // Reserved bookmark name for AI instructions
 const AI_INSTRUCTIONS_BOOKMARK = "ai_instructions";
 
@@ -253,6 +312,373 @@ function canCallExport(): { allowed: boolean; waitMs: number } {
 
 function markExportCalled(): void {
   lastExportRequestTime = Date.now();
+}
+
+function getLocalDateKey(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function sanitizeTimestampForFilename(timestamp: string): string {
+  return timestamp.replace(/:/g, "-");
+}
+
+function getBackupPaths(backupId: string): {
+  dataPath: string;
+  metadataPath: string;
+} {
+  const backupsDir = getBackupsDir();
+  return {
+    dataPath: path.join(backupsDir, `${backupId}.json`),
+    metadataPath: path.join(backupsDir, `${backupId}.meta.json`),
+  };
+}
+
+function listBackupSnapshots(): Array<
+  BackupSnapshotMetadata & { path: string; size_bytes: number }
+> {
+  const backupsDir = getBackupsDir();
+  const entries = fs
+    .readdirSync(backupsDir)
+    .filter((entry) => entry.endsWith(".meta.json"));
+
+  const backups = entries.flatMap((entry) => {
+    try {
+      const metadataPath = path.join(backupsDir, entry);
+      const metadata = JSON.parse(
+        fs.readFileSync(metadataPath, "utf-8"),
+      ) as BackupSnapshotMetadata;
+      const dataPath = path.join(backupsDir, metadata.filename);
+
+      if (!fs.existsSync(dataPath)) {
+        return [];
+      }
+
+      return [
+        {
+          ...metadata,
+          path: dataPath,
+          size_bytes: fs.statSync(dataPath).size,
+        },
+      ];
+    } catch {
+      return [];
+    }
+  });
+
+  backups.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  return backups;
+}
+
+function findBackupById(
+  backupId: string,
+): (BackupSnapshotMetadata & { path: string; size_bytes: number }) | null {
+  return listBackupSnapshots().find((backup) => backup.id === backupId) ?? null;
+}
+
+function syncLatestBackupMetadata(
+  db: Database,
+  backups: Array<BackupSnapshotMetadata & { path: string; size_bytes: number }>,
+): void {
+  const latestBackup = backups[0];
+
+  if (latestBackup) {
+    db.run(
+      "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_backup_date', ?)",
+      [latestBackup.backup_date],
+    );
+    db.run(
+      "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_backup_created_at', ?)",
+      [latestBackup.created_at],
+    );
+    db.run(
+      "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_backup_id', ?)",
+      [latestBackup.id],
+    );
+  } else {
+    db.run(
+      "DELETE FROM sync_meta WHERE key IN ('last_backup_date', 'last_backup_created_at', 'last_backup_id')",
+    );
+  }
+
+  saveDb();
+}
+
+function deleteBackupSnapshotFiles(backupId: string): void {
+  const { dataPath, metadataPath } = getBackupPaths(backupId);
+  if (fs.existsSync(dataPath)) {
+    fs.unlinkSync(dataPath);
+  }
+  if (fs.existsSync(metadataPath)) {
+    fs.unlinkSync(metadataPath);
+  }
+}
+
+function pruneOldBackups(db: Database): {
+  maxBackups: number | null;
+  deletedIds: string[];
+  remainingCount: number;
+} {
+  const maxBackups = getConfiguredMaxBackups();
+  const backups = listBackupSnapshots();
+
+  if (maxBackups === null) {
+    return {
+      maxBackups,
+      deletedIds: [],
+      remainingCount: backups.length,
+    };
+  }
+
+  const backupsToDelete = backups.slice(maxBackups);
+  for (const backup of backupsToDelete) {
+    deleteBackupSnapshotFiles(backup.id);
+  }
+
+  const remainingBackups = backups.slice(0, maxBackups);
+  syncLatestBackupMetadata(db, remainingBackups);
+
+  return {
+    maxBackups,
+    deletedIds: backupsToDelete.map((backup) => backup.id),
+    remainingCount: remainingBackups.length,
+  };
+}
+
+function hasBackupForDate(dateKey: string): boolean {
+  return listBackupSnapshots().some((backup) => backup.backup_date === dateKey);
+}
+
+function loadBackupSnapshot(backupId: string): {
+  metadata: BackupSnapshotMetadata & { path: string; size_bytes: number };
+  snapshot: BackupSnapshotRecord;
+} {
+  const metadata = findBackupById(backupId);
+  if (!metadata) {
+    throw new Error(`Backup "${backupId}" not found.`);
+  }
+
+  const snapshot = JSON.parse(
+    fs.readFileSync(metadata.path, "utf-8"),
+  ) as BackupSnapshotRecord;
+
+  if (snapshot.format !== BACKUP_FORMAT) {
+    throw new Error(`Backup "${backupId}" has an unsupported format.`);
+  }
+
+  return { metadata, snapshot };
+}
+
+function writeBackupSnapshot(
+  db: Database,
+  exportData: WorkflowyExportResponse,
+  source: BackupSnapshotMetadata["source"],
+): BackupSnapshotMetadata & { path: string; size_bytes: number } {
+  const now = new Date();
+  const createdAt = now.toISOString();
+  const backupDate = getLocalDateKey(now);
+  const backupId = `${BACKUP_FILE_PREFIX}-${sanitizeTimestampForFilename(createdAt)}`;
+  const filename = `${backupId}.json`;
+  const { dataPath, metadataPath } = getBackupPaths(backupId);
+
+  const snapshot: BackupSnapshotRecord = {
+    format: BACKUP_FORMAT,
+    created_at: createdAt,
+    backup_date: backupDate,
+    source,
+    export: exportData,
+  };
+
+  const metadata: BackupSnapshotMetadata = {
+    id: backupId,
+    filename,
+    created_at: createdAt,
+    backup_date: backupDate,
+    node_count: exportData.nodes.length,
+    source,
+  };
+
+  fs.writeFileSync(dataPath, JSON.stringify(snapshot));
+  fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+
+  db.run(
+    "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_backup_date', ?)",
+    [backupDate],
+  );
+  db.run(
+    "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_backup_created_at', ?)",
+    [createdAt],
+  );
+  db.run(
+    "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_backup_id', ?)",
+    [backupId],
+  );
+  saveDb();
+
+  return {
+    ...metadata,
+    path: dataPath,
+    size_bytes: fs.statSync(dataPath).size,
+  };
+}
+
+async function fetchNodesExport(apiKey: string): Promise<WorkflowyExportResponse> {
+  markExportCalled();
+
+  const url = "https://workflowy.com/api/v1/nodes-export";
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!res.ok) {
+    throw new Error(`API error: ${res.status} ${res.statusText}`);
+  }
+
+  const responseData = (await res.json()) as WorkflowyExportResponse;
+  return {
+    nodes: Array.isArray(responseData.nodes) ? responseData.nodes : [],
+  };
+}
+
+function replaceNodesCache(
+  db: Database,
+  nodes: WorkflowyExportNode[],
+  syncedAt: string,
+): void {
+  // Replace the cache in one transaction so search never sees a partial export.
+  db.run("BEGIN TRANSACTION");
+
+  try {
+    const childrenCountMap = new Map<string, number>();
+    for (const node of nodes) {
+      if (node.parent_id) {
+        childrenCountMap.set(
+          node.parent_id,
+          (childrenCountMap.get(node.parent_id) || 0) + 1,
+        );
+      }
+    }
+
+    db.run("DELETE FROM nodes");
+
+    for (const node of nodes) {
+      const childrenCount = childrenCountMap.get(node.id) || 0;
+      db.run(
+        "INSERT INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+          node.id,
+          node.name || "",
+          node.note || "",
+          node.parent_id || null,
+          node.completed ? 1 : 0,
+          childrenCount,
+          node.priority || 0,
+          node.createdAt ? new Date(node.createdAt * 1000).toISOString() : null,
+          node.modifiedAt
+            ? new Date(node.modifiedAt * 1000).toISOString()
+            : null,
+          node.completedAt
+            ? new Date(node.completedAt * 1000).toISOString()
+            : null,
+        ],
+      );
+    }
+
+    db.run(
+      "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_full_sync', ?)",
+      [syncedAt],
+    );
+    db.run(
+      "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_sync_node_count', ?)",
+      [String(nodes.length)],
+    );
+    db.run(
+      "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('sync_in_progress', 'false')",
+    );
+
+    db.run("COMMIT");
+    saveDb();
+  } catch (error) {
+    try {
+      db.run("ROLLBACK");
+    } catch {
+      // Ignore rollback errors
+    }
+    throw error;
+  }
+}
+
+async function createBackupFromApi(
+  apiKey: string,
+  db: Database,
+  source: BackupSnapshotMetadata["source"],
+): Promise<{
+  success: boolean;
+  backup?: BackupSnapshotMetadata & { path: string; size_bytes: number };
+  error?: string;
+}> {
+  const { allowed, waitMs } = canCallExport();
+  if (!allowed) {
+    return {
+      success: false,
+      error: `Rate limited. Please wait ${Math.ceil(waitMs / 1000)} seconds.`,
+    };
+  }
+
+  try {
+    const exportData = await fetchNodesExport(apiKey);
+    const backup = writeBackupSnapshot(db, exportData, source);
+    const pruneResult = pruneOldBackups(db);
+    if (pruneResult.deletedIds.length > 0) {
+      writeMcpLog(
+        `Pruned ${pruneResult.deletedIds.length} old backup${pruneResult.deletedIds.length === 1 ? "" : "s"} to keep the latest ${pruneResult.maxBackups}.`,
+        "info",
+      );
+    }
+    return { success: true, backup };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function ensureDailyBackup(
+  apiKey: string,
+  db: Database,
+): Promise<{
+  created: boolean;
+  backup?: BackupSnapshotMetadata & { path: string; size_bytes: number };
+  skipped?: string;
+  error?: string;
+}> {
+  const today = getLocalDateKey();
+  if (hasBackupForDate(today)) {
+    return {
+      created: false,
+      skipped: `Backup already exists for ${today}.`,
+    };
+  }
+
+  const result = await createBackupFromApi(apiKey, db, "daily");
+  if (!result.success) {
+    return {
+      created: false,
+      error: result.error,
+    };
+  }
+
+  return {
+    created: true,
+    backup: result.backup,
+  };
 }
 
 // Build breadcrumb path for a node by walking up parent_id chain
@@ -373,6 +799,9 @@ async function performFullSync(
   success: boolean;
   nodes_synced?: number;
   synced_at?: string;
+  backup_created?: boolean;
+  backup_id?: string;
+  backup_path?: string;
   error?: string;
 }> {
   // Check rate limit
@@ -425,101 +854,42 @@ async function performFullSync(
   saveDb();
 
   try {
-    markExportCalled();
+    const responseData = await fetchNodesExport(apiKey);
+    const nodes = responseData.nodes;
+    const now = new Date().toISOString();
 
-    const url = "https://workflowy.com/api/v1/nodes-export";
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-    });
-
-    if (!res.ok) {
-      throw new Error(`API error: ${res.status} ${res.statusText}`);
-    }
-
-    const responseData = (await res.json()) as {
-      nodes: Array<{
-        id: string;
-        name?: string;
-        note?: string;
-        parent_id?: string;
-        completed?: boolean;
-        completedAt?: number | null;
-        priority?: number;
-        createdAt?: number;
-        modifiedAt?: number;
-      }>;
-    };
-
-    const nodes = responseData.nodes || [];
-
-    // Build a map to count children for each node
-    const childrenCountMap = new Map<string, number>();
-    for (const node of nodes) {
-      if (node.parent_id) {
-        childrenCountMap.set(
-          node.parent_id,
-          (childrenCountMap.get(node.parent_id) || 0) + 1,
+    let dailyBackup:
+      | (BackupSnapshotMetadata & { path: string; size_bytes: number })
+      | null = null;
+    if (!hasBackupForDate(getLocalDateKey())) {
+      try {
+        dailyBackup = writeBackupSnapshot(db, responseData, "daily");
+        const pruneResult = pruneOldBackups(db);
+        if (pruneResult.deletedIds.length > 0) {
+          writeMcpLog(
+            `Pruned ${pruneResult.deletedIds.length} old backup${pruneResult.deletedIds.length === 1 ? "" : "s"} to keep the latest ${pruneResult.maxBackups}.`,
+            "info",
+          );
+        }
+      } catch (backupError) {
+        writeMcpLog(
+          `Daily backup creation failed during sync: ${backupError}`,
+          "warning",
         );
       }
     }
 
-    // Transactional update
-    db.run("BEGIN TRANSACTION");
-    db.run("DELETE FROM nodes");
-
-    for (const node of nodes) {
-      const childrenCount = childrenCountMap.get(node.id) || 0;
-      db.run(
-        "INSERT INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-          node.id,
-          node.name || "",
-          node.note || "",
-          node.parent_id || null,
-          node.completed ? 1 : 0,
-          childrenCount,
-          node.priority || 0,
-          node.createdAt ? new Date(node.createdAt * 1000).toISOString() : null,
-          node.modifiedAt
-            ? new Date(node.modifiedAt * 1000).toISOString()
-            : null,
-          node.completedAt ? new Date(node.completedAt * 1000).toISOString() : null,
-        ],
-      );
-    }
-
-    // Update metadata
-    const now = new Date().toISOString();
-    db.run(
-      "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_full_sync', ?)",
-      [now],
-    );
-    db.run(
-      "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_sync_node_count', ?)",
-      [String(nodes.length)],
-    );
-    db.run(
-      "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('sync_in_progress', 'false')",
-    );
-
-    db.run("COMMIT");
-    saveDb();
+    replaceNodesCache(db, nodes, now);
 
     return {
       success: true,
       nodes_synced: nodes.length,
       synced_at: now,
+      backup_created: Boolean(dailyBackup),
+      backup_id: dailyBackup?.id,
+      backup_path: dailyBackup?.path,
     };
   } catch (error) {
-    try {
-      db.run("ROLLBACK");
-    } catch {
-      // Ignore rollback errors
-    }
     db.run(
       "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('sync_in_progress', 'false')",
     );
@@ -1464,6 +1834,49 @@ const defaultTools = [
       },
     },
   },
+  {
+    name: "list_backups",
+    description: toolDescriptions.list_backups,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "create_backup",
+    description: toolDescriptions.create_backup,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "restore_backup",
+    description: toolDescriptions.restore_backup,
+    inputSchema: {
+      type: "object",
+      properties: {
+        backup_id: {
+          type: "string",
+          description: "The backup ID returned by list_backups",
+        },
+      },
+      required: ["backup_id"],
+    },
+  },
+  {
+    name: "export_backup",
+    description: toolDescriptions.export_backup,
+    inputSchema: {
+      type: "object",
+      properties: {
+        backup_id: {
+          type: "string",
+          description: "The backup ID returned by list_backups",
+        },
+        destination_path: {
+          type: "string",
+          description:
+            "File or directory path where the backup JSON should be copied",
+        },
+      },
+      required: ["backup_id", "destination_path"],
+    },
+  },
 ];
 
 // Get tools with custom descriptions merged in
@@ -1979,6 +2392,123 @@ async function main() {
         };
       }
 
+      case "list_backups": {
+        const backups = listBackupSnapshots();
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  backups,
+                  backup_directory: getBackupsDir(),
+                  total_backups: backups.length,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
+      case "create_backup": {
+        const result = await createBackupFromApi(apiKey, db, "manual");
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      }
+
+      case "restore_backup": {
+        const backupId = args?.backup_id as string;
+        const { metadata, snapshot } = loadBackupSnapshot(backupId);
+
+        replaceNodesCache(db, snapshot.export.nodes, metadata.created_at);
+        db.run(
+          "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_restored_backup_id', ?)",
+          [metadata.id],
+        );
+        db.run(
+          "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_restore_at', ?)",
+          [new Date().toISOString()],
+        );
+        saveDb();
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  restored_backup: metadata,
+                  restored_nodes: snapshot.export.nodes.length,
+                  note: "This restores the local cache/search database from the backup file. It does not upload changes back into Workflowy.",
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
+      case "export_backup": {
+        const backupId = args?.backup_id as string;
+        const destinationPath = args?.destination_path as string;
+        const backup = findBackupById(backupId);
+
+        if (!backup) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  { success: false, error: `Backup "${backupId}" not found.` },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
+
+        let finalDestination = destinationPath;
+        if (fs.existsSync(destinationPath) && fs.statSync(destinationPath).isDirectory()) {
+          finalDestination = path.join(destinationPath, backup.filename);
+        } else if (!path.extname(destinationPath)) {
+          ensureDirExists(destinationPath);
+          finalDestination = path.join(destinationPath, backup.filename);
+        } else {
+          ensureDirExists(path.dirname(destinationPath));
+        }
+
+        fs.copyFileSync(backup.path, finalDestination);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  backup_id: backup.id,
+                  source_path: backup.path,
+                  destination_path: finalDestination,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -1991,7 +2521,6 @@ async function main() {
 
   // Auto-sync on startup if cache is stale (>24 hours)
   try {
-    const apiKey = getApiKey();
     const db = await getDb();
 
     // Clear any stuck sync_in_progress flag from previous crashed sessions
@@ -2022,6 +2551,16 @@ async function main() {
       shouldSync = hoursOld > 1;
     }
 
+    const pruneResult = pruneOldBackups(db);
+    if (pruneResult.deletedIds.length > 0 && pruneResult.maxBackups !== null) {
+      writeMcpLog(
+        `Pruned ${pruneResult.deletedIds.length} old backup${pruneResult.deletedIds.length === 1 ? "" : "s"} to keep the latest ${pruneResult.maxBackups}.`,
+        "info",
+      );
+    }
+
+    const apiKey = getApiKey();
+
     if (shouldSync) {
       writeMcpLog("Cache is stale or empty, starting background sync...", "info");
       // Run sync in background (don't await)
@@ -2032,6 +2571,12 @@ async function main() {
               `Background sync complete: ${result.nodes_synced} nodes synced`,
               "success"
             );
+            if (result.backup_created && result.backup_id) {
+              writeMcpLog(
+                `Daily backup saved during sync: ${result.backup_id}`,
+                "success",
+              );
+            }
           } else {
             writeMcpLog(`Background sync failed: ${result.error}`, "error");
           }
@@ -2041,6 +2586,22 @@ async function main() {
         });
     } else {
       writeMcpLog("Cache is fresh, skipping auto-sync", "info");
+      ensureDailyBackup(apiKey, db)
+        .then((result) => {
+          if (result.created && result.backup) {
+            writeMcpLog(
+              `Daily backup saved: ${result.backup.id}`,
+              "success",
+            );
+          } else if (result.skipped) {
+            writeMcpLog(result.skipped, "info");
+          } else if (result.error) {
+            writeMcpLog(`Daily backup failed: ${result.error}`, "warning");
+          }
+        })
+        .catch((err) => {
+          writeMcpLog(`Daily backup check failed: ${err}`, "warning");
+        });
     }
   } catch (err) {
     // Don't fail startup if auto-sync check fails

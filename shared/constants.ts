@@ -119,6 +119,14 @@ Bookmarks store frequently-accessed node IDs with context notes:
 
 search_nodes searches the local cache by text. Use it when you don't know where something is. Results include the node ID which you can use with read_doc.
 
+## Backups
+
+- Daily backups store a full local export of the Workflowy account in the app data directory
+- list_backups shows available snapshots and their file paths
+- create_backup creates an extra snapshot on demand
+- restore_backup restores the local cache from a stored snapshot; it does not upload content back into Workflowy
+- export_backup copies a stored snapshot to another folder or file path
+
 ## Common Mistakes to Avoid
 
 ❌ **Skipping list_bookmarks** — The bookmark you need probably already exists.
@@ -218,6 +226,18 @@ Create nested structure:
 
   sync_nodes:
     "Sync all Workflowy nodes to local cache for searching. Rate limited to once per minute. The cache auto-syncs when stale (>1 hour).",
+
+  list_backups:
+    "List locally stored Workflowy account backups. Returns backup IDs, timestamps, file paths, sizes, and node counts.",
+
+  create_backup:
+    "Create a fresh full-account backup from Workflowy's nodes-export API and store it locally as a JSON snapshot. Rate limited to once per minute.",
+
+  restore_backup:
+    "Restore the local cache/search database from a stored backup snapshot. This does not upload data back into Workflowy; it only restores the local cached export.",
+
+  export_backup:
+    "Copy a stored backup snapshot to another file path or directory so the user can archive it elsewhere.",
 } as const;
 
 // Tool names in the order they should appear
@@ -229,6 +249,10 @@ export const toolNames = [
   "edit_doc",
   "search_nodes",
   "sync_nodes",
+  "list_backups",
+  "create_backup",
+  "restore_backup",
+  "export_backup",
 ] as const;
 
 export type ToolName = (typeof toolNames)[number];

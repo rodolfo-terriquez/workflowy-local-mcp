@@ -8,8 +8,10 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 
 ## Features
 
-- **7 tools** for managing Workflowy nodes (read, edit, search, sync, bookmarks)
+- **11 tools** for managing Workflowy nodes, cache, and backups
 - **Local SQLite cache** with fast full-text search across all your nodes
+- **Daily full-account backups** stored locally as JSON snapshots
+- **Configurable backup retention** — optionally keep only the newest N backups
 - **Bookmarks** to save frequently-used node locations with context notes
 - **AI Instructions** — create an "AI Instructions" node in Workflowy to customize LLM behavior across sessions
 - **Sync-on-access** — reads auto-sync from the Workflowy API so data is always fresh
@@ -46,6 +48,10 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 | `edit_doc` | Edit nodes via the LLM Doc API. Supports `insert`, `update`, and `delete` operations in a single call. Can create nested structures with one request. |
 | `search_nodes` | Search locally cached nodes by text. Returns results with breadcrumb paths and a preview of each result's children. |
 | `sync_nodes` | Full sync of all Workflowy nodes to local cache (rate limited to 1 request per minute) |
+| `list_backups` | List stored full-account backup snapshots with IDs, timestamps, sizes, and file paths |
+| `create_backup` | Create a fresh full-account backup snapshot on demand |
+| `restore_backup` | Restore the local search/cache database from a stored backup snapshot |
+| `export_backup` | Copy a stored backup snapshot to another file path or directory |
 
 ## How It Works
 
@@ -55,6 +61,8 @@ The server uses Workflowy's LLM Doc API for reads and writes, with a local SQLit
 - **Calendar targets**: Use `today`, `tomorrow`, `next_week`, or `inbox` as node IDs — the API handles date resolution automatically
 - **Batch operations**: `edit_doc` can perform multiple insert/update/delete operations in a single API call
 - **Local cache for search**: `search_nodes` uses a SQLite cache that auto-syncs when stale (>1 hour)
+- **Daily backups**: a complete `nodes-export` snapshot is saved once per day while the server is running
+- **Retention control**: set an optional max backup count; when unset, all backups are kept
 - **Rate limiting**: The Workflowy `nodes-export` API (used for cache sync) is limited to 1 request per minute; the LLM Doc API has no rate limit
 
 ## Desktop App
@@ -88,7 +96,7 @@ All data is stored locally in the app data directory:
 | Windows | `%APPDATA%\com.workflowy.local-mcp\` |
 | Linux | `~/.local/share/com.workflowy.local-mcp/` |
 
-Files stored: `config.json` (settings), `bookmarks.db` (SQLite database with bookmarks and node cache), `mcp-logs.json` (server logs).
+Files stored: `config.json` (settings), `bookmarks.db` (SQLite database with bookmarks and node cache), `mcp-logs.json` (server logs), `backups/` (daily full-account export snapshots plus metadata).
 
 The API key can also be set via the `WORKFLOWY_API_KEY` environment variable instead of the app config.
 
