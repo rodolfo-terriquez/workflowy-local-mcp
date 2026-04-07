@@ -719,6 +719,54 @@ function formatPathString(path: string[]): string {
   return path.join(" > ");
 }
 
+function getNodeParentIdFromCache(
+  db: Database,
+  nodeId: string,
+): string | null | undefined {
+  const result = db.exec("SELECT parent_id FROM nodes WHERE id = ?", [nodeId]);
+  if (result.length === 0 || result[0].values.length === 0) {
+    return undefined;
+  }
+
+  return (result[0].values[0][0] as string) || null;
+}
+
+function getCacheSyncState(db: Database): {
+  nodeCount: number;
+  lastSync: string | null;
+  needsSync: boolean;
+} {
+  const countResult = db.exec("SELECT COUNT(*) FROM nodes");
+  const nodeCount = (countResult[0]?.values[0][0] as number) ?? 0;
+
+  const metaResult = db.exec(
+    "SELECT value FROM sync_meta WHERE key = 'last_full_sync'",
+  );
+  const lastSync = (metaResult[0]?.values[0]?.[0] as string) ?? null;
+
+  let needsSync = nodeCount === 0;
+  if (!needsSync && lastSync) {
+    const lastSyncDate = new Date(lastSync);
+    const msOld = Date.now() - lastSyncDate.getTime();
+    needsSync = msOld > STALE_THRESHOLD_MS;
+  } else if (!lastSync) {
+    needsSync = true;
+  }
+
+  return { nodeCount, lastSync, needsSync };
+}
+
+function markCacheStale(db: Database): void {
+  const staleTimestamp = new Date(
+    Date.now() - STALE_THRESHOLD_MS - 1000,
+  ).toISOString();
+  db.run(
+    "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_full_sync', ?)",
+    [staleTimestamp],
+  );
+  saveDb();
+}
+
 // Delete a node and all its descendants recursively
 function deleteNodeAndDescendants(db: Database, nodeId: string): void {
   // Get all children
@@ -907,25 +955,7 @@ async function ensureCacheFresh(
   apiKey: string,
   db: Database,
 ): Promise<{ synced: boolean; error?: string }> {
-  // Check node count
-  const countResult = db.exec("SELECT COUNT(*) FROM nodes");
-  const nodeCount = (countResult[0]?.values[0][0] as number) ?? 0;
-
-  // Check last sync time
-  const metaResult = db.exec(
-    "SELECT value FROM sync_meta WHERE key = 'last_full_sync'",
-  );
-  const lastSync = metaResult[0]?.values[0]?.[0] as string | undefined;
-
-  // Determine if sync needed
-  let needsSync = nodeCount === 0; // Empty cache
-  if (!needsSync && lastSync) {
-    const lastSyncDate = new Date(lastSync);
-    const msOld = Date.now() - lastSyncDate.getTime();
-    needsSync = msOld > STALE_THRESHOLD_MS;
-  } else if (!lastSync) {
-    needsSync = true;
-  }
+  const { needsSync } = getCacheSyncState(db);
 
   if (!needsSync) {
     return { synced: false };
@@ -950,6 +980,7 @@ async function syncSingleNode(
   apiKey: string,
   db: Database,
   nodeId: string,
+  parentIdOverride?: string | null,
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const url = `https://workflowy.com/api/v1/nodes/${nodeId}`;
@@ -964,7 +995,7 @@ async function syncSingleNode(
     if (!res.ok) {
       if (res.status === 404) {
         // Node was deleted - remove from cache
-        db.run("DELETE FROM nodes WHERE id = ?", [nodeId]);
+        deleteNodeFromCache(db, nodeId);
         saveDb();
         return { success: true };
       }
@@ -993,7 +1024,9 @@ async function syncSingleNode(
       "SELECT parent_id, children_count FROM nodes WHERE id = ?",
       [node.id],
     );
-    const parentId = existingResult[0]?.values[0]?.[0] as string | null;
+    const cachedParentId = existingResult[0]?.values[0]?.[0] as string | null;
+    const parentId =
+      parentIdOverride !== undefined ? parentIdOverride : cachedParentId;
     const childrenCount = (existingResult[0]?.values[0]?.[1] as number) ?? 0;
 
     db.run(
@@ -1268,6 +1301,20 @@ function getTrigrams(s: string): Set<string> {
   return trigrams;
 }
 
+function getSearchFragments(s: string): string[] {
+  const normalized = s.toLowerCase();
+  if (normalized.length < 3) {
+    return normalized ? [normalized] : [];
+  }
+
+  const fragments = new Set<string>();
+  for (let i = 0; i < normalized.length - 2; i++) {
+    fragments.add(normalized.substring(i, i + 3));
+  }
+
+  return Array.from(fragments);
+}
+
 // Compute trigram similarity between two strings (0 to 1)
 function trigramSimilarity(a: string, b: string): number {
   const trigramsA = getTrigrams(a);
@@ -1457,6 +1504,33 @@ function getAIInstructions(db: Database): string | null {
   return lines.length > 0 ? lines.join("\n") : null;
 }
 
+function normalizeNodeApiParentId(
+  parentId: string | null | undefined,
+): string | null | undefined {
+  if (parentId === undefined) return undefined;
+  if (parentId === "None") return null;
+  if (parentId === null) return null;
+  if (parentId === "inbox" || parentId === "home") return parentId;
+  if (
+    parentId === "today" ||
+    parentId === "tomorrow" ||
+    parentId === "next_week" ||
+    /^\d{4}(?:-\d{2}){0,2}$/.test(parentId)
+  ) {
+    return undefined;
+  }
+
+  return parentId;
+}
+
+function encodeSyncTarget(parentId: string | null): string {
+  return parentId === null ? "__ROOT__" : parentId;
+}
+
+function decodeSyncTarget(parentId: string): string | null {
+  return parentId === "__ROOT__" ? null : parentId;
+}
+
 // Get API key from environment or config file
 function getApiKey(): string {
   // First check environment variable
@@ -1473,6 +1547,77 @@ function getApiKey(): string {
   throw new Error(
     "Workflowy API key not configured. Please set it in the app settings.",
   );
+}
+
+async function getValidatedApiKey(): Promise<string> {
+  const apiKey = getApiKey();
+  await validateWorkflowyToken(apiKey);
+  return apiKey;
+}
+
+async function refreshCacheAfterEdit(
+  apiKey: string,
+  db: Database,
+  root: string,
+  operations: LlmDocOperation[],
+): Promise<void> {
+  markCacheStale(db);
+
+  const parentTargets = new Set<string>();
+  const nodeSyncRequests = new Map<string, string | null | undefined>();
+
+  const addParentTarget = (parentId: string | null | undefined): void => {
+    const normalized = normalizeNodeApiParentId(parentId);
+    if (normalized !== undefined) {
+      parentTargets.add(encodeSyncTarget(normalized));
+    }
+  };
+
+  for (const operation of operations) {
+    if (operation.op === "insert") {
+      if (operation.under !== undefined) {
+        addParentTarget(operation.under);
+      } else if (operation.after) {
+        addParentTarget(getNodeParentIdFromCache(db, operation.after));
+      } else {
+        addParentTarget(root);
+      }
+      continue;
+    }
+
+    if (!operation.ref) {
+      continue;
+    }
+
+    const cachedParentId = getNodeParentIdFromCache(db, operation.ref);
+
+    if (operation.op === "update") {
+      nodeSyncRequests.set(operation.ref, undefined);
+      continue;
+    }
+
+    if (operation.op === "delete") {
+      addParentTarget(cachedParentId);
+      nodeSyncRequests.set(operation.ref, undefined);
+      continue;
+    }
+
+    if (operation.op === "move") {
+      const newParentId = normalizeNodeApiParentId(operation.under);
+      addParentTarget(newParentId);
+      nodeSyncRequests.set(operation.ref, newParentId);
+    }
+  }
+
+  for (const parentTarget of parentTargets) {
+    await syncNodeChildren(apiKey, db, decodeSyncTarget(parentTarget)).catch(
+      () => {},
+    );
+  }
+
+  for (const [nodeId, parentIdOverride] of nodeSyncRequests.entries()) {
+    await syncSingleNode(apiKey, db, nodeId, parentIdOverride).catch(() => {});
+  }
 }
 
 // Helper function for Workflowy API requests
@@ -1606,7 +1751,10 @@ async function llmDocEdit(
   apiKey: string,
   root: string,
   operations: LlmDocOperation[],
-): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+): Promise<{
+  success: boolean;
+  content: Array<{ type: "text"; text: string }>;
+}> {
   const url = `${LLM_DOC_API_BASE}/api/llm/doc/edit`;
 
   const body = {
@@ -1633,6 +1781,7 @@ async function llmDocEdit(
 
   if (!res.ok) {
     return {
+      success: false,
       content: [
         {
           type: "text" as const,
@@ -1647,6 +1796,7 @@ async function llmDocEdit(
   }
 
   return {
+    success: true,
     content: [
       {
         type: "text" as const,
@@ -1930,13 +2080,14 @@ async function main() {
   // Try to sync ai_instructions bookmark children before loading instructions
   // This ensures we have fresh data at startup
   try {
-    const apiKey = getApiKey();
+    const apiKey = await getValidatedApiKey();
     const bookmarkResult = db.exec(
       "SELECT node_id FROM bookmarks WHERE name = ?",
       [AI_INSTRUCTIONS_BOOKMARK],
     );
     if (bookmarkResult.length > 0 && bookmarkResult[0].values.length > 0) {
       const nodeId = bookmarkResult[0].values[0][0] as string;
+      await syncSingleNode(apiKey, db, nodeId).catch(() => {});
       await syncNodeChildren(apiKey, db, nodeId).catch(() => {});
     }
   } catch {
@@ -1985,7 +2136,7 @@ async function main() {
       
       // Auto-sync at the start of each conversation (if cache is stale)
       try {
-        const apiKey = getApiKey();
+        const apiKey = await getValidatedApiKey();
         await ensureCacheFresh(apiKey, db);
       } catch (e) {
         // Ignore sync errors - instructions can still be returned
@@ -2013,9 +2164,6 @@ async function main() {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     const db = await getDb();
-    const apiKey = getApiKey();
-
-    await validateWorkflowyToken(apiKey);
 
     switch (name) {
       // Bookmark operations
@@ -2059,16 +2207,26 @@ async function main() {
         // For ai_instructions, we await to ensure fresh data for the response
         // For others, sync in background
         const aiInstructionsBookmark = rows.find(r => r.name === AI_INSTRUCTIONS_BOOKMARK);
+        let apiKey: string | null = null;
+
+        try {
+          apiKey = await getValidatedApiKey();
+        } catch {
+          apiKey = null;
+        }
         
         // Await sync for ai_instructions so we get fresh data
-        if (aiInstructionsBookmark?.node_id) {
+        if (apiKey && aiInstructionsBookmark?.node_id) {
+          await syncSingleNode(apiKey, db, aiInstructionsBookmark.node_id).catch(() => {});
           await syncNodeChildren(apiKey, db, aiInstructionsBookmark.node_id).catch(() => {});
         }
         
         // Sync other bookmarks in background
-        for (const row of rows) {
-          if (row.node_id && row.name !== AI_INSTRUCTIONS_BOOKMARK) {
-            syncNodeChildren(apiKey, db, row.node_id).catch(() => {});
+        if (apiKey) {
+          for (const row of rows) {
+            if (row.node_id && row.name !== AI_INSTRUCTIONS_BOOKMARK) {
+              syncNodeChildren(apiKey, db, row.node_id).catch(() => {});
+            }
           }
         }
         
@@ -2125,6 +2283,7 @@ async function main() {
 
       // LLM Doc API operations
       case "read_doc": {
+        const apiKey = await getValidatedApiKey();
         const nodeId = args?.node_id as string;
         const depth = Math.min(Math.max((args?.depth as number) ?? 3, 1), 10);
 
@@ -2134,6 +2293,7 @@ async function main() {
       }
 
       case "edit_doc": {
+        const apiKey = await getValidatedApiKey();
         const root = args?.root as string;
         const operations = args?.operations as LlmDocOperation[];
 
@@ -2160,14 +2320,26 @@ async function main() {
         }
 
         writeMcpLog(`[edit_doc] Editing root: ${root}, operations: ${JSON.stringify(operations)}`, "info");
-        
-        return llmDocEdit(apiKey, root, operations);
+
+        const result = await llmDocEdit(apiKey, root, operations);
+        if (result.success) {
+          await refreshCacheAfterEdit(apiKey, db, root, operations).catch(() => {});
+        }
+
+        return { content: result.content };
       }
 
       // Cache and search operations
       case "search_nodes": {
-        // Auto-sync if cache is empty or stale
-        await ensureCacheFresh(apiKey, db);
+        const initialCacheState = getCacheSyncState(db);
+        if (initialCacheState.needsSync) {
+          try {
+            const apiKey = await getValidatedApiKey();
+            await ensureCacheFresh(apiKey, db);
+          } catch {
+            // Fall back to the local cache if we can't refresh it right now.
+          }
+        }
 
         const query = args?.query as string;
         const includeCompleted = (args?.include_completed as boolean) ?? false;
@@ -2240,6 +2412,30 @@ async function main() {
            ${completedFilter}`,
           [phrasePattern, phrasePattern],
         ));
+
+        if (queryWords.length === 1) {
+          const fragments = getSearchFragments(queryWords[0]);
+          if (fragments.length > 0) {
+            const fragmentClauses: string[] = [];
+            const fragmentParams: (string | number)[] = [];
+
+            for (const fragment of fragments) {
+              const pattern = `%${fragment.toUpperCase()}%`;
+              fragmentClauses.push("(UPPER(name) LIKE ? OR UPPER(note) LIKE ?)");
+              fragmentParams.push(pattern, pattern);
+            }
+            fragmentParams.push(300);
+
+            addResults(db.exec(
+              `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at
+               FROM nodes
+               WHERE (${fragmentClauses.join(" OR ")})
+               ${completedFilter}
+               LIMIT ?`,
+              fragmentParams,
+            ));
+          }
+        }
 
         if (queryWords.length >= 2) {
           // --- Pass 2: AND — all words present (LIMIT 200) ---
@@ -2390,6 +2586,7 @@ async function main() {
       }
 
       case "sync_nodes": {
+        const apiKey = await getValidatedApiKey();
         const result = await performFullSync(apiKey, db);
         return {
           content: [
@@ -2422,6 +2619,7 @@ async function main() {
       }
 
       case "create_backup": {
+        const apiKey = await getValidatedApiKey();
         const result = await createBackupFromApi(apiKey, db, "manual");
         return {
           content: [
@@ -2568,7 +2766,7 @@ async function main() {
       );
     }
 
-    const apiKey = getApiKey();
+    const apiKey = await getValidatedApiKey();
 
     if (shouldSync) {
       writeMcpLog("Cache is stale or empty, starting background sync...", "info");
