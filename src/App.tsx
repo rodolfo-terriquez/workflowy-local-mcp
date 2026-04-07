@@ -3,8 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import "./App.css";
 import { defaultServerInstructions, defaultTools } from "../shared/constants";
-
-const GITHUB_REPO = "rodolfo-terriquez/workflowy-local-mcp";
+import { checkForAppUpdatesOnLaunch, checkForAppUpdatesManually, getAvailableAppUpdate } from "./services/updater";
 
 interface LogEntry {
   id: number;
@@ -104,10 +103,10 @@ function App() {
   // Update check state
   const [updateAvailable, setUpdateAvailable] = useState<{
     version: string;
-    url: string;
   } | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const [appVersion, setAppVersion] = useState("");
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
 
   useEffect(() => {
     loadConfig();
@@ -117,7 +116,11 @@ function App() {
 
   useEffect(() => {
     if (!appVersion) return;
-    void checkForUpdates(appVersion);
+    // Auto-check for updates on launch via Tauri updater
+    void checkForAppUpdatesOnLaunch().then(() => {
+      // After the auto-check (which may have already installed), probe availability for the banner
+      void probeForUpdate();
+    });
   }, [appVersion]);
 
   const loadAppVersion = async () => {
@@ -287,58 +290,33 @@ function App() {
     }
   };
 
-  const checkForUpdates = async (currentVersion: string) => {
+  const probeForUpdate = async () => {
     try {
-      const { fetch } = await import("@tauri-apps/plugin-http");
-      const response = await fetch(
-        `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
-        {
-          method: "GET",
-          headers: {
-            Accept: "application/vnd.github.v3+json",
-          },
-        }
-      );
-
-      if (!response.ok) {
-        console.log("Could not check for updates:", response.status);
-        return;
-      }
-
-      const release = await response.json();
-      const latestVersion = release.tag_name?.replace(/^v/, "") || "";
-      
-      // Compare versions (simple string comparison works for semver)
-      if (latestVersion && compareVersions(latestVersion, currentVersion) > 0) {
-        setUpdateAvailable({
-          version: latestVersion,
-          url: release.html_url || `https://github.com/${GITHUB_REPO}/releases/latest`,
-        });
+      const result = await getAvailableAppUpdate();
+      if (result.status === "available" && result.version) {
+        setUpdateAvailable({ version: result.version });
       }
     } catch (e) {
-      // Silently fail - update check is not critical
-      console.log("Update check failed:", e);
+      console.log("Update probe failed:", e);
     }
   };
 
-  // Compare semver versions: returns 1 if a > b, -1 if a < b, 0 if equal
-  const compareVersions = (a: string, b: string): number => {
-    const partsA = a.split(".").map(Number);
-    const partsB = b.split(".").map(Number);
-    
-    for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
-      const numA = partsA[i] || 0;
-      const numB = partsB[i] || 0;
-      if (numA > numB) return 1;
-      if (numA < numB) return -1;
-    }
-    return 0;
-  };
-
-  const openReleasePage = async () => {
-    if (updateAvailable?.url) {
-      const opener = await import("@tauri-apps/plugin-opener");
-      await opener.openUrl(updateAvailable.url);
+  const handleInstallUpdate = async () => {
+    setIsCheckingUpdate(true);
+    try {
+      const result = await checkForAppUpdatesManually();
+      if (result.status === "installed") {
+        setUpdateAvailable(null);
+      } else if (result.status === "declined") {
+        setUpdateDismissed(true);
+      } else if (result.status === "up-to-date") {
+        setUpdateAvailable(null);
+        showToast("You're on the latest version!", "success");
+      } else if (result.status === "error") {
+        showToast(`Update check failed: ${result.message}`, "error");
+      }
+    } finally {
+      setIsCheckingUpdate(false);
     }
   };
 
@@ -958,9 +936,10 @@ function App() {
               <div className="update-actions">
                 <button 
                   className="update-link" 
-                  onClick={openReleasePage}
+                  onClick={handleInstallUpdate}
+                  disabled={isCheckingUpdate}
                 >
-                  Download
+                  {isCheckingUpdate ? "Installing..." : "Install"}
                 </button>
                 <button 
                   className="update-dismiss" 

@@ -1584,16 +1584,17 @@ async function llmDocRead(
 
 // LLM Doc API: Edit nodes (insert, update, delete operations)
 interface LlmDocOperation {
-  op: "insert" | "update" | "delete";
-  under?: string; // For insert: parent tag or target (today, inbox, etc.)
+  op: "insert" | "update" | "delete" | "move";
+  under?: string; // For insert/move: parent tag or target (today, inbox, etc.)
+  after?: string; // For insert: sibling tag to insert after
   items?: Array<{
     n: string; // Name/text
-    l?: string; // Line type (todo, h1, h2, h3, bullets, code, quote)
+    l?: string; // Line type (todo, h1, h2, h3, p, bullets, code, quote, table)
     x?: number; // Completion status (1 = complete, 0 = incomplete)
     c?: unknown[]; // Children for nested structures
   }>;
-  position?: "top" | "bottom"; // For insert
-  ref?: string; // For update/delete: tag of node to modify
+  position?: "top" | "bottom"; // For insert/move
+  ref?: string; // For update/delete/move: tag of node to modify or move
   to?: {
     n?: string; // New name
     l?: string; // New line type
@@ -1739,12 +1740,16 @@ const defaultTools = [
             properties: {
               op: {
                 type: "string",
-                enum: ["insert", "update", "delete"],
+                enum: ["insert", "update", "delete", "move"],
                 description: "Operation type",
               },
               under: {
                 type: "string",
-                description: "For insert: parent tag or target (today, inbox, etc.)",
+                description: "For insert/move: parent tag or target (today, inbox, etc.). For insert, exactly one of 'under' or 'after' is required.",
+              },
+              after: {
+                type: "string",
+                description: "For insert: sibling tag to insert after. Exactly one of 'under' or 'after' is required.",
               },
               items: {
                 type: "array",
@@ -1755,8 +1760,8 @@ const defaultTools = [
                     n: { type: "string", description: "Name/text content" },
                     l: {
                       type: "string",
-                      enum: ["todo", "h1", "h2", "h3", "bullets", "code", "quote"],
-                      description: "Line type",
+                      enum: ["todo", "h1", "h2", "h3", "p", "bullets", "code", "quote", "table"],
+                      description: "Line type. Use 'table' for tables (children are columns, each column's children are cells/rows).",
                     },
                     x: {
                       type: "number",
@@ -1778,14 +1783,18 @@ const defaultTools = [
               },
               ref: {
                 type: "string",
-                description: "For update/delete: tag of node to modify",
+                description: "For update/delete/move: tag of node to modify or move",
               },
               to: {
                 type: "object",
                 description: "For update: new values",
                 properties: {
                   n: { type: "string", description: "New name" },
-                  l: { type: "string", description: "New line type" },
+                  l: {
+                    type: "string",
+                    enum: ["todo", "h1", "h2", "h3", "p", "bullets", "code", "quote", "table"],
+                    description: "New line type",
+                  },
                   x: { type: "number", description: "New completion status" },
                 },
               },

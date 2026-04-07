@@ -17,7 +17,7 @@ export const defaultServerInstructions = `This MCP server connects to a user's W
 
 ## Key Concepts
 - Nodes are identified by 12-character hex tags (e.g., "b605f0e85a4a")
-- Nodes can have: name (text), type (h1/h2/h3/todo/bullets/code/quote), completion status (x: 1 or 0)
+- Nodes can have: name (text), type (h1/h2/h3/todo/bullets/code/quote/table/p), completion status (x: 1 or 0)
 - Children are nested in the "c" array
 - Special targets: \`today\`, \`tomorrow\`, \`next_week\`, \`inbox\`, \`None\` (home/root)
 - Calendar IDs are also valid node IDs: \`YYYY\`, \`YYYY-MM\`, \`YYYY-MM-DD\`
@@ -39,7 +39,7 @@ The API returns tag-as-key JSON. Example:
 
 - The first key-value is the node's tag and name
 - \`c\` contains children
-- \`l\` is the line type (todo, h1, h2, h3, bullets, code, quote)
+- \`l\` is the line type (todo, h1, h2, h3, bullets, code, quote, table, p)
 - \`x: 1\` means completed
 - \`+: 1\` means there are more children below the depth limit
 - Mirrors appear as \`{"<tag>": "Original Name", "m": "<original_short_id>", "c": [...]}\`: the \`m\` marker means this is a live mirror of another node, and the mirrored children are already included inline (no separate read needed)
@@ -50,6 +50,7 @@ The API returns tag-as-key JSON. Example:
 \`\`\`json
 {"op": "insert", "under": "today", "items": [{"n": "New task", "l": "todo"}], "position": "top"}
 \`\`\`
+Insert can also use \`"after": "<sibling-tag>"\` instead of \`under\` to place items after a specific sibling. Exactly one of \`under\` or \`after\` is required.
 
 **Update** — Modify existing nodes (requires prior read):
 \`\`\`json
@@ -59,6 +60,11 @@ The API returns tag-as-key JSON. Example:
 **Delete** — Remove nodes (requires prior read):
 \`\`\`json
 {"op": "delete", "ref": "aa11bb22cc33"}
+\`\`\`
+
+**Move** — Move a node (with all its children) to a new parent:
+\`\`\`json
+{"op": "move", "ref": "aa11bb22cc33", "under": "dd44ee55ff66", "position": "top"}
 \`\`\`
 
 **Batch operations** — Multiple operations in one call:
@@ -104,9 +110,33 @@ edit_doc(root="today", operations=[{"op": "insert", "under": "today", "items": [
 | \`h1\` | Heading 1 |
 | \`h2\` | Heading 2 |
 | \`h3\` | Heading 3 |
+| \`p\` | Paragraph |
 | \`bullets\` | Bullet list item |
 | \`code\` | Code block |
 | \`quote\` | Quote block |
+| \`table\` | Table (children are columns; each column's children are cells/rows) |
+
+## Tables
+
+A table is a node with \`"l": "table"\`. Its structure is:
+- **Table node** (\`"l": "table"\`) → children are **columns**
+- Each **column** → children are **cells** (rows are aligned by index across columns)
+- All columns must have the same number of cell children (same row count). The API does not auto-normalize.
+
+**Create a table:**
+\`\`\`json
+{"op": "insert", "under": "inbox", "items": [{
+  "n": "Best Tacos", "l": "table", "c": [
+    {"n": "Restaurant", "c": [{"n": "Taco Stand"}, {"n": "El Pastor"}]},
+    {"n": "Rating", "c": [{"n": "9/10"}, {"n": "8/10"}]}
+  ]
+}], "position": "top"}
+\`\`\`
+
+**Edit table cells:** Use \`update\` with the cell's tag.
+**Add a row:** Use one \`insert\` per column (with \`after\` the last cell tag in each column).
+**Delete a row:** Use one \`delete\` per column for each cell in that row.
+**Add a column:** \`insert\` under the table tag with one item whose \`c\` contains one cell per existing row.
 
 ## Bookmarks
 
@@ -135,7 +165,7 @@ search_nodes searches the local cache by text. Use it when you don't know where 
 
 ❌ **Multiple edit_doc calls** — Batch operations into one call when possible.
 
-❌ **Editing without reading** — Update and delete require a prior read to populate the cache.
+❌ **Editing without reading** — Update, delete, and move require a prior read to populate the cache.
 
 ❌ **Passing a full Workflowy URL to read_doc** — Extract the 12-hex ID after \`#/\` first.
 
@@ -174,20 +204,22 @@ The response contains:
 **Response format:**
 - First key-value is the node's tag and name
 - "c" array contains children
-- "l" is line type (todo, h1, h2, h3, bullets, code, quote)
+- "l" is line type (todo, h1, h2, h3, p, bullets, code, quote, table)
 - "x": 1 means completed
+- Table nodes ("l": "table"): children are columns, each column's children are cells (rows aligned by index)
 - "+": 1 means more children exist below depth limit
 - Mirrors appear as \`{"<tag>": "Original Name", "m": "<original_short_id>", "c": [...]}\`: the "m" marker means this is a live mirror of another node, and the mirrored children are already included inline (no separate read needed)
 - "ancestors" shows the path to root
 
 **IMPORTANT:** After reading, you can use the tags in edit_doc operations.`,
 
-  edit_doc: `Edit Workflowy nodes. Supports insert, update, and delete operations.
+  edit_doc: `Edit Workflowy nodes. Supports insert, update, delete, and move operations.
 
 **Operations:**
 
-INSERT — Create new nodes:
+INSERT — Create new nodes (use "under" OR "after", exactly one is required):
 \`{"op": "insert", "under": "<tag>|today|inbox", "items": [{"n": "Name", "l": "todo"}], "position": "top|bottom"}\`
+\`{"op": "insert", "after": "<sibling-tag>", "items": [{"n": "Name"}]}\`
 
 UPDATE — Modify existing nodes (requires prior read_doc):
 \`{"op": "update", "ref": "<tag>", "to": {"n": "New name", "l": "h1", "x": 1}}\`
@@ -195,20 +227,29 @@ UPDATE — Modify existing nodes (requires prior read_doc):
 DELETE — Remove nodes (requires prior read_doc):
 \`{"op": "delete", "ref": "<tag>"}\`
 
+MOVE — Move a node with all children to a new parent (requires prior read_doc):
+\`{"op": "move", "ref": "<tag>", "under": "<new-parent-tag>|inbox", "position": "top|bottom"}\`
+
 **Parameters:**
 - root: The subtree root tag (from a prior read_doc) OR a target like "today"
 - operations: Array of operations to perform
 
 **Item properties:**
 - n: Name/text content (required for insert)
-- l: Line type (todo, h1, h2, h3, bullets, code, quote)
+- l: Line type (todo, h1, h2, h3, p, bullets, code, quote, table)
 - x: Completion status (1 = complete, 0 = incomplete)
 - c: Children array for nested structures
 
+**Tables:**
+Create a table with \`"l": "table"\`. Children are columns; each column's children are cells (rows aligned by index).
+\`{"op": "insert", "under": "inbox", "items": [{"n": "My Table", "l": "table", "c": [{"n": "Col A", "c": [{"n": "Row 1"}, {"n": "Row 2"}]}, {"n": "Col B", "c": [{"n": "Val 1"}, {"n": "Val 2"}]}]}], "position": "top"}\`
+Edit cells with update (ref = cell tag). Add rows with one insert per column (use "after" last cell). Delete rows with one delete per column.
+
 **Behavior notes:**
-- Update/delete should follow a prior read_doc of the same subtree
+- Update/delete/move should follow a prior read_doc of the same subtree
 - If the API returns \`read_required\`, call read_doc for that root and retry
 - Insert can target a known parent tag or a system target such as "today" or "inbox"
+- Insert with "after" places items after a specific sibling (no position needed)
 
 **Examples:**
 
@@ -219,7 +260,10 @@ Complete a task:
 \`edit_doc(root="<root-tag>", operations=[{"op": "update", "ref": "<task-tag>", "to": {"x": 1}}])\`
 
 Create nested structure:
-\`edit_doc(root="inbox", operations=[{"op": "insert", "under": "inbox", "items": [{"n": "Project", "l": "h2", "c": [{"n": "Task 1", "l": "todo"}, {"n": "Task 2", "l": "todo"}]}], "position": "top"}])\``,
+\`edit_doc(root="inbox", operations=[{"op": "insert", "under": "inbox", "items": [{"n": "Project", "l": "h2", "c": [{"n": "Task 1", "l": "todo"}, {"n": "Task 2", "l": "todo"}]}], "position": "top"}])\`
+
+Create a table:
+\`edit_doc(root="inbox", operations=[{"op": "insert", "under": "inbox", "items": [{"n": "Scores", "l": "table", "c": [{"n": "Name", "c": [{"n": "Alice"}, {"n": "Bob"}]}, {"n": "Score", "c": [{"n": "95"}, {"n": "87"}]}]}], "position": "top"}])\``,
 
   search_nodes:
     "Search Workflowy nodes by text in the local cache. Returns matches with their path, child preview, and timestamps (created_at, modified_at, completed_at). Use the node_id from results with read_doc to get full content.",

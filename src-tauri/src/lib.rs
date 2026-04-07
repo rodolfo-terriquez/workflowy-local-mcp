@@ -244,6 +244,12 @@ pub fn run() {
                 Ok(path) => println!("MCP server copied to: {:?}", path),
                 Err(e) => eprintln!("Warning: Failed to copy MCP server: {}", e),
             }
+
+            // Initialize the updater plugin
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
             Ok(())
         })
         .run(tauri::generate_context!())
