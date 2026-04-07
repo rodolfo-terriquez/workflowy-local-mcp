@@ -45,6 +45,97 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
+      - name: Validate updater signing secret (release only)
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY repository secret."
+            exit 1
+          fi
+
+          KEY_CLEAN="$(printf '%s' "${TAURI_SIGNING_PRIVATE_KEY}" | tr -d '\r')"
+
+          decode_base64_portable() {
+            if printf '%s' "$1" | base64 --decode >/dev/null 2>&1; then
+              printf '%s' "$1" | base64 --decode
+              return 0
+            fi
+            if printf '%s' "$1" | base64 -d >/dev/null 2>&1; then
+              printf '%s' "$1" | base64 -d
+              return 0
+            fi
+            if printf '%s' "$1" | base64 -D >/dev/null 2>&1; then
+              printf '%s' "$1" | base64 -D
+              return 0
+            fi
+            return 1
+          }
+
+          # If the secret was pasted with literal \n characters, Tauri cannot parse it.
+          if printf '%s' "${KEY_CLEAN}" | grep -q '\\n'; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY contains literal \\n characters. Store it as real multi-line text."
+            echo "::error::Recommended: gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri-keys/workflowy-local-mcp.key"
+            exit 1
+          fi
+
+          # Some setups accidentally save the entire key text as one base64 line.
+          # Decode it for validation if needed.
+          KEY_LINE1="$(printf '%s\n' "${KEY_CLEAN}" | sed -n '1p')"
+          if ! printf '%s' "${KEY_LINE1}" | grep -Eq '^untrusted comment: (mini|r)sign (encrypted )?secret key$'; then
+            if KEY_DECODED="$(decode_base64_portable "${KEY_CLEAN}")"; then
+              KEY_DECODED="$(printf '%s' "${KEY_DECODED}" | tr -d '\r')"
+              DECODED_LINE1="$(printf '%s\n' "${KEY_DECODED}" | sed -n '1p')"
+              if printf '%s' "${DECODED_LINE1}" | grep -Eq '^untrusted comment: (mini|r)sign (encrypted )?secret key$'; then
+                KEY_CLEAN="${KEY_DECODED}"
+              fi
+            fi
+          fi
+
+          LINE1="$(printf '%s\n' "${KEY_CLEAN}" | sed -n '1p' | sed -E 's/[[:space:]]+$//')"
+          PAYLOAD_COMPACT="$(printf '%s\n' "${KEY_CLEAN}" | sed '1d' | tr -d '[:space:]')"
+
+          # Some UIs/pastes collapse the key into a single line: "<header> <payload>"
+          if [ -z "${PAYLOAD_COMPACT}" ] && printf '%s' "${KEY_CLEAN}" | grep -Eq '^untrusted comment: (mini|r)sign (encrypted )?secret key[[:space:]]+[A-Za-z0-9+/=[:space:]]+$'; then
+            LINE1="$(printf '%s' "${KEY_CLEAN}" | sed -E 's/[[:space:]]+[A-Za-z0-9+/=[:space:]]+$//' | sed -E 's/[[:space:]]+$//')"
+            PAYLOAD_COMPACT="$(printf '%s' "${KEY_CLEAN}" | sed -E 's/^untrusted comment: (mini|r)sign (encrypted )?secret key[[:space:]]+//' | tr -d '[:space:]')"
+          fi
+
+          if ! printf '%s' "${LINE1}" | grep -Eq '^untrusted comment: (mini|r)sign (encrypted )?secret key$'; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY header line is invalid."
+            exit 1
+          fi
+
+          if [ -z "${PAYLOAD_COMPACT}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY payload line is missing."
+            exit 1
+          fi
+
+          # Catches copy/paste corruption like trailing '%' from shell prompts.
+          if ! printf '%s' "${PAYLOAD_COMPACT}" | grep -Eq '^[A-Za-z0-9+/=]+$'; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY payload contains non-base64 characters."
+            exit 1
+          fi
+
+          if [ $(( ${#PAYLOAD_COMPACT} % 4 )) -ne 0 ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY payload has invalid base64 length."
+            exit 1
+          fi
+
+          # Tauri updater signing expects TAURI_SIGNING_PRIVATE_KEY to be the
+          # base64-encoded full key text (header + payload), like ~/.tauri-keys/*.key
+          KEY_CANONICAL_B64="$(
+            {
+              printf '%s\n' "${LINE1}"
+              printf '%s\n' "${PAYLOAD_COMPACT}"
+            } | base64 | tr -d '\r\n'
+          )"
+          echo "TAURI_SIGNING_PRIVATE_KEY=${KEY_CANONICAL_B64}" >> "$GITHUB_ENV"
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -53,7 +144,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ github.event.release.id }}
           args: ${{ matrix.args }}
