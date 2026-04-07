@@ -15,7 +15,7 @@ jobs:
         include:
           # macOS ARM (Apple Silicon)
           - platform: macos-14
-            args: --target aarch64-apple-darwin --bundles app,updater
+            args: --target aarch64-apple-darwin --bundles app,dmg,updater
             rust_target: aarch64-apple-darwin
           # Windows x64
           - platform: windows-latest
