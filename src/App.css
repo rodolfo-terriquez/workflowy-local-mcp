@@ -1,3 +1,11 @@
+@font-face {
+    font-family: "Geist Mono";
+    src: url("./fonts/GeistMono-Variable.woff2") format("woff2");
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+
 * {
     margin: 0;
     padding: 0;
@@ -5,18 +13,16 @@
 }
 
 body {
-    font-family:
-        -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
-        sans-serif;
+    font-family: "Geist Mono", monospace;
     background: #1a1a2e;
     color: #e0e0e0;
     min-height: 100vh;
-    overflow: hidden;
 }
 
 .app-layout {
     display: flex;
     height: 100vh;
+    overflow: hidden;
 }
 
 .sidebar {
@@ -193,7 +199,7 @@ body {
     border-radius: 8px;
     color: #fff;
     font-size: 14px;
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     transition: border-color 0.2s;
 }
 
@@ -262,7 +268,7 @@ body {
     background: rgba(0, 0, 0, 0.3);
     padding: 2px 6px;
     border-radius: 4px;
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 12px;
 }
 
@@ -277,7 +283,7 @@ body {
     background: rgba(0, 0, 0, 0.3);
     padding: 2px 6px;
     border-radius: 4px;
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 12px;
     color: #a5a8fc;
 }
@@ -324,7 +330,7 @@ body {
     background: rgba(0, 0, 0, 0.3);
     padding: 2px 6px;
     border-radius: 4px;
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 11px;
     color: #a5a8fc;
 }
@@ -335,7 +341,7 @@ body {
     padding: 12px;
     max-height: 500px;
     overflow-y: auto;
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 12px;
     line-height: 1.6;
 }
@@ -437,7 +443,7 @@ body {
     background: rgba(0, 0, 0, 0.4);
     border-radius: 8px;
     padding: 12px;
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 11px;
     line-height: 1.5;
     color: #a5a8fc;
@@ -461,8 +467,7 @@ body {
     border-radius: 8px;
     color: #fff;
     font-size: 13px;
-    font-family:
-        -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: "Geist Mono", monospace;
     transition: border-color 0.2s;
     resize: vertical;
     min-height: 60px;
@@ -516,7 +521,7 @@ body {
 }
 
 .tool-name {
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 13px;
     color: #a5a8fc;
     flex: 1;
@@ -551,8 +556,7 @@ body {
     border-radius: 6px;
     color: #fff;
     font-size: 12px;
-    font-family:
-        -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: "Geist Mono", monospace;
     resize: vertical;
     min-height: 50px;
 }
@@ -627,7 +631,7 @@ body {
 }
 
 .api-key-masked {
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 14px;
     color: #86efac;
     background: transparent;
@@ -766,7 +770,7 @@ body {
 }
 
 .bookmark-col-id code {
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 11px;
     color: #888;
     background: rgba(0, 0, 0, 0.3);
@@ -826,7 +830,7 @@ body {
 }
 
 .bookmark-node-id code {
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 11px;
     color: #888;
     background: rgba(0, 0, 0, 0.3);
@@ -891,7 +895,7 @@ body {
     border-radius: 6px;
     color: #fff;
     font-size: 13px;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: "Geist Mono", monospace;
     resize: vertical;
     min-height: 70px;
 }
@@ -1011,7 +1015,7 @@ body {
     background: rgba(0, 0, 0, 0.3);
     border-radius: 6px;
     color: #a5a8fc;
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 11px;
     line-height: 1.5;
     padding: 10px 12px;
@@ -1052,7 +1056,7 @@ body {
 
 .backup-id {
     color: #e0e0e0;
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 12px;
     line-height: 1.5;
     word-break: break-all;
@@ -1097,7 +1101,7 @@ body {
     background: rgba(0, 0, 0, 0.3);
     border-radius: 6px;
     color: #888;
-    font-family: "Monaco", "Menlo", monospace;
+    font-family: "Geist Mono", monospace;
     font-size: 11px;
     line-height: 1.5;
     padding: 8px 10px;
@@ -1108,4 +1112,383 @@ body {
     display: flex;
     justify-content: flex-end;
     margin-top: 12px;
+}
+
+/* ===== ONBOARDING WIZARD ===== */
+.onboarding-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 32px;
+}
+
+.onboarding-card {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 520px;
+    background: rgb(30, 30, 50);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    padding: 40px;
+}
+
+.onboarding-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 36px;
+}
+
+.onboarding-progress {
+    display: inline-block;
+    margin-left: auto;
+    font-size: 12px;
+    color: #666;
+    background: rgba(255, 255, 255, 0.06);
+    padding: 4px 12px;
+    border-radius: 12px;
+}
+
+.onboarding-step h2 {
+    font-size: 22px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 8px;
+}
+
+.onboarding-subtitle {
+    font-size: 14px;
+    color: #888;
+    margin-bottom: 28px;
+    line-height: 1.5;
+}
+
+.onboarding-subtitle a {
+    color: #a5a8fc;
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.onboarding-subtitle a:hover {
+    text-decoration: underline;
+    color: #c4c6fd;
+}
+
+.onboarding-input-group {
+    margin-bottom: 20px;
+}
+
+.onboarding-input-group input {
+    width: 100%;
+    padding: 14px 16px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 10px;
+    color: #fff;
+    font-size: 15px;
+    font-family: "Geist Mono", monospace;
+    transition: border-color 0.2s;
+}
+
+.onboarding-input-group input:focus {
+    outline: none;
+    border-color: #6366f1;
+}
+
+.onboarding-input-group input::placeholder {
+    color: #555;
+    font-family: "Geist Mono", monospace;
+}
+
+.onboarding-error {
+    color: #f87171;
+    font-size: 13px;
+    margin-top: 10px;
+    padding: 8px 12px;
+    background: rgba(239, 68, 68, 0.1);
+    border-radius: 6px;
+}
+
+.onboarding-step-nav {
+    margin-bottom: 20px;
+}
+
+.onboarding-back {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 13px;
+    cursor: pointer;
+    padding: 4px 0;
+    transition: color 0.2s;
+}
+
+.onboarding-back:hover {
+    color: #e0e0e0;
+}
+
+.onboarding-client-cards {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 24px;
+}
+
+.onboarding-client-card {
+    padding: 14px 16px;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    color: #888;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-align: center;
+}
+
+.onboarding-client-card:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: #e0e0e0;
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
+.onboarding-client-card.selected {
+    background: rgba(99, 102, 241, 0.15);
+    border-color: rgba(99, 102, 241, 0.5);
+    color: #a5a8fc;
+}
+
+.onboarding-config-section {
+    margin-bottom: 28px;
+}
+
+.onboarding-config-path {
+    font-size: 13px;
+    color: #888;
+    margin-bottom: 10px;
+}
+
+.onboarding-config-path code {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "Geist Mono", monospace;
+    font-size: 11px;
+    color: #a5a8fc;
+}
+
+.onboarding-config-section .config-preview {
+    margin-bottom: 14px;
+}
+
+.onboarding-config-manual {
+    font-size: 13px;
+    color: #666;
+    margin-top: 12px;
+    line-height: 1.5;
+}
+
+.onboarding-config-manual code {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    color: #a5a8fc;
+}
+
+.onboarding-finish-section {
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    padding-top: 24px;
+}
+
+.onboarding-finish-hint {
+    font-size: 13px;
+    color: #888;
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+
+/* ===== DASHBOARD ===== */
+.dashboard-wrapper {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 32px;
+    position: relative;
+}
+
+.dashboard-particle-canvas {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+    pointer-events: none;
+}
+
+.dashboard-update-banner {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 10px;
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 13px;
+    z-index: 100;
+}
+
+.dashboard-update-banner > span {
+    color: #a5a8fc;
+    font-weight: 500;
+}
+
+.dashboard-card {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 480px;
+    background: rgb(30, 30, 50);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    padding: 40px;
+    text-align: center;
+}
+
+.dashboard-header {
+    margin-bottom: 32px;
+}
+
+.dashboard-header h1 {
+    font-size: 22px;
+    font-weight: 600;
+    color: #fff;
+}
+
+.dashboard-status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin-bottom: 32px;
+}
+
+.dashboard-status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.dashboard-status-dot.status-dot-ok {
+    background: #4ade80;
+    box-shadow: 0 0 8px rgba(74, 222, 128, 0.4);
+}
+
+.dashboard-status-dot.status-dot-error {
+    background: #f87171;
+    box-shadow: 0 0 8px rgba(248, 113, 113, 0.4);
+}
+
+.dashboard-status-text {
+    font-size: 14px;
+    font-weight: 500;
+    color: #86efac;
+}
+
+.dashboard-info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 32px;
+    text-align: left;
+}
+
+.dashboard-info-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 14px 16px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 10px;
+}
+
+.dashboard-info-item.dashboard-info-full {
+    grid-column: 1 / -1;
+}
+
+.dashboard-info-label {
+    font-size: 11px;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 500;
+}
+
+.dashboard-info-value {
+    font-size: 15px;
+    color: #e0e0e0;
+    font-weight: 500;
+}
+
+.dashboard-info-mono {
+    font-family: "Geist Mono", monospace;
+    font-size: 14px;
+    color: #a5a8fc;
+    letter-spacing: 0.5px;
+}
+
+.dashboard-settings-btn {
+    margin-top: 4px;
+}
+
+.dashboard-github-link {
+    position: relative;
+    z-index: 1;
+    display: inline-block;
+    margin-top: 24px;
+    color: #555;
+    transition: color 0.2s;
+}
+
+.dashboard-github-link:hover {
+    color: #a5a8fc;
+}
+
+/* ===== SETTINGS SIDEBAR BACK BUTTON ===== */
+.sidebar-back-btn {
+    display: block;
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 13px;
+    cursor: pointer;
+    padding: 0;
+    margin-bottom: 12px;
+    transition: color 0.2s;
+    text-align: left;
+}
+
+.sidebar-back-btn:hover {
+    color: #e0e0e0;
+}
+
+.settings-link {
+    color: #a5a8fc;
+    text-decoration: none;
+}
+
+.settings-link:hover {
+    text-decoration: underline;
+    color: #c4c6fd;
 }

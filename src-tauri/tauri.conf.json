@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Workflowy Local MCP",
+  "productName": "Workflowy MCP",
   "version": "1.3.2",
   "identifier": "com.workflowy.local-mcp",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Workflowy Local MCP",
+        "title": "Workflowy MCP",
         "width": 900,
         "height": 700,
         "resizable": true,
@@ -25,6 +25,7 @@
   },
   "bundle": {
     "active": true,
+    "copyright": "Copyright © 2026 Rodolfo Terriquez",
     "targets": "all",
     "createUpdaterArtifacts": true,
     "icon": [

@@ -245,10 +245,83 @@ pub fn run() {
                 Err(e) => eprintln!("Warning: Failed to copy MCP server: {}", e),
             }
 
-            // Initialize the updater plugin
             #[cfg(desktop)]
-            app.handle()
-                .plugin(tauri_plugin_updater::Builder::new().build())?;
+            {
+                use tauri::image::Image;
+                use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+
+                let icon = Image::from_bytes(include_bytes!("../icons/icon.png"))
+                    .expect("Failed to load app icon");
+
+                let about_metadata = AboutMetadata {
+                    name: Some("Workflowy MCP".into()),
+                    copyright: Some("Copyright \u{00A9} 2026 Rodolfo Terriquez".into()),
+                    icon: Some(icon),
+                    ..Default::default()
+                };
+
+                let handle = app.handle();
+
+                let app_menu = Submenu::with_items(
+                    handle,
+                    "Workflowy MCP",
+                    true,
+                    &[
+                        &PredefinedMenuItem::about(handle, None, Some(about_metadata))?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::services(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::hide(handle, None)?,
+                        &PredefinedMenuItem::hide_others(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::quit(handle, None)?,
+                    ],
+                )?;
+
+                let edit_menu = Submenu::with_items(
+                    handle,
+                    "Edit",
+                    true,
+                    &[
+                        &PredefinedMenuItem::undo(handle, None)?,
+                        &PredefinedMenuItem::redo(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::cut(handle, None)?,
+                        &PredefinedMenuItem::copy(handle, None)?,
+                        &PredefinedMenuItem::paste(handle, None)?,
+                        &PredefinedMenuItem::select_all(handle, None)?,
+                    ],
+                )?;
+
+                let view_menu = Submenu::with_items(
+                    handle,
+                    "View",
+                    true,
+                    &[&PredefinedMenuItem::fullscreen(handle, None)?],
+                )?;
+
+                let window_menu = Submenu::with_items(
+                    handle,
+                    "Window",
+                    true,
+                    &[
+                        &PredefinedMenuItem::minimize(handle, None)?,
+                        &PredefinedMenuItem::maximize(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::close_window(handle, None)?,
+                    ],
+                )?;
+
+                let menu = Menu::with_items(
+                    handle,
+                    &[&app_menu, &edit_menu, &view_menu, &window_menu],
+                )?;
+
+                app.set_menu(menu)?;
+
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
 
             Ok(())
         })

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import "./App.css";
@@ -56,6 +56,208 @@ interface AppConfig {
   maxBackups?: number;
 }
 
+function initParticleBackground(canvas: HTMLCanvasElement): () => void {
+  const ctx = canvas.getContext("2d")!;
+  if (!ctx) return () => {};
+
+  let animFrameId = 0;
+  let spawnInterval = 0;
+  let resizeTimeout = 0;
+
+  const bgR = 26, bgG = 26, bgB = 46;
+  const spacing = 10;
+  const radius = 3;
+  const baseRgb = { r: 38, g: 38, b: 58 };
+  const targetRgb = { r: 140, g: 140, b: 170 };
+  const fadeRgb = { r: bgR, g: bgG, b: bgB };
+  const transitionSpeed = 2.5;
+  const targetActivePercent = 0.006;
+  const moveChance = 0.7;
+  const minWaitTime = 600;
+  const maxWaitTime = 2200;
+  const checkInterval = 120;
+  const edgeFadeDistance = 300;
+  
+
+  const STATE_IDLE = 0, STATE_DARKENING = 1, STATE_WAITING = 2;
+  const STATE_LIGHTENING_TO_MOVE = 3, STATE_DARKENING_AFTER_MOVE = 4;
+  const STATE_DECAYING = 5, STATE_FLEEING = 6;
+
+  const directions = [
+    { dx: -1, dy: 0 }, { dx: 1, dy: 0 }, { dx: 0, dy: -1 }, { dx: 0, dy: 1 },
+    { dx: -1, dy: -1 }, { dx: 1, dy: -1 }, { dx: -1, dy: 1 }, { dx: 1, dy: 1 },
+  ];
+
+  interface Dot {
+    x: number; y: number; gridX: number; gridY: number;
+    progress: number; state: number; waitUntil: number;
+    fadedBaseR: number; fadedBaseG: number; fadedBaseB: number;
+    fadedTargetR: number; fadedTargetG: number; fadedTargetB: number;
+    fleeStartTime?: number;
+    fleeOriginX?: number; fleeOriginY?: number;
+    fleeTargetX?: number; fleeTargetY?: number;
+    drawX?: number; drawY?: number;
+  }
+
+  let dots: Dot[] = [];
+  const dotGrid: Record<string, Dot> = {};
+  const activeDots = new Set<Dot>();
+  let gridCols = 0, gridRows = 0;
+
+  function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
+
+  function calcEdgeFade(y: number) {
+    const dist = Math.min(y, canvas.height - y);
+    return dist >= edgeFadeDistance ? 1 : dist / edgeFadeDistance;
+  }
+
+  function initDots() {
+    dots = []; activeDots.clear();
+    for (const k in dotGrid) delete dotGrid[k];
+    gridCols = Math.floor(canvas.width / spacing);
+    gridRows = Math.floor(canvas.height / spacing);
+    for (let gx = 0; gx < gridCols; gx++) {
+      for (let gy = 0; gy < gridRows; gy++) {
+        const x = gx * spacing + spacing / 2;
+        const y = gy * spacing + spacing / 2;
+        const ef = calcEdgeFade(y);
+        const dot: Dot = {
+          x, y, gridX: gx, gridY: gy, progress: 0, state: STATE_IDLE, waitUntil: 0,
+          fadedBaseR: Math.round(lerp(fadeRgb.r, baseRgb.r, ef)),
+          fadedBaseG: Math.round(lerp(fadeRgb.g, baseRgb.g, ef)),
+          fadedBaseB: Math.round(lerp(fadeRgb.b, baseRgb.b, ef)),
+          fadedTargetR: Math.round(lerp(fadeRgb.r, targetRgb.r, ef)),
+          fadedTargetG: Math.round(lerp(fadeRgb.g, targetRgb.g, ef)),
+          fadedTargetB: Math.round(lerp(fadeRgb.b, targetRgb.b, ef)),
+        };
+        dots.push(dot);
+        dotGrid[`${gx},${gy}`] = dot;
+      }
+    }
+  }
+
+  function getDotAt(gx: number, gy: number) { return dotGrid[`${gx},${gy}`] || null; }
+  function isAvailable(gx: number, gy: number) {
+    if (gx < 0 || gx >= gridCols || gy < 0 || gy >= gridRows) return false;
+    const d = getDotAt(gx, gy); return d !== null && d.state === STATE_IDLE;
+  }
+  function getAdjacentAvailable(dot: Dot) {
+    return directions.filter(d => isAvailable(dot.gridX + d.dx, dot.gridY + d.dy))
+      .map(d => ({ gx: dot.gridX + d.dx, gy: dot.gridY + d.dy }));
+  }
+  function activateDot(dot: Dot) { dot.state = STATE_DARKENING; activeDots.add(dot); }
+  function deactivateDot(dot: Dot) { dot.state = STATE_IDLE; dot.progress = 0; activeDots.delete(dot); }
+
+  const onMouseMove = null;
+
+  function spawnWanderers() {
+    const needed = Math.floor(dots.length * targetActivePercent) - activeDots.size;
+    if (needed <= 0) return;
+    const idle = dots.filter(d => d.state === STATE_IDLE);
+    for (let i = 0; i < needed && idle.length > 0; i++) {
+      const idx = Math.floor(Math.random() * idle.length);
+      activateDot(idle[idx]); idle.splice(idx, 1);
+    }
+  }
+
+  function draw() {
+    ctx.fillStyle = `rgb(${bgR},${bgG},${bgB})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const groups = new Map<string, Dot[]>();
+    for (const dot of dots) {
+      const r = Math.round(lerp(dot.fadedBaseR, dot.fadedTargetR, dot.progress));
+      const g = Math.round(lerp(dot.fadedBaseG, dot.fadedTargetG, dot.progress));
+      const b = Math.round(lerp(dot.fadedBaseB, dot.fadedTargetB, dot.progress));
+      const key = `${r},${g},${b}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(dot);
+    }
+    for (const [key, ds] of groups) {
+      const [r, g, b] = key.split(",");
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.beginPath();
+      for (const d of ds) {
+        const px = d.drawX ?? d.x, py = d.drawY ?? d.y;
+        ctx.moveTo(px + radius, py); ctx.arc(px, py, radius, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    }
+  }
+
+  function update() {
+    const speed = transitionSpeed / 100, now = performance.now();
+    const remove: Dot[] = [];
+    for (const dot of activeDots) {
+      switch (dot.state) {
+        case STATE_DARKENING:
+          dot.progress += speed;
+          if (dot.progress >= 1) {
+            dot.progress = 1; dot.state = STATE_WAITING;
+            dot.waitUntil = now + minWaitTime + Math.random() * (maxWaitTime - minWaitTime);
+          }
+          break;
+        case STATE_WAITING:
+          if (now >= dot.waitUntil) {
+            if (Math.random() < moveChance) {
+              const avail = getAdjacentAvailable(dot);
+              if (avail.length > 0) {
+                const pos = avail[Math.floor(Math.random() * avail.length)];
+                const td = getDotAt(pos.gx, pos.gy)!;
+                td.state = STATE_DARKENING_AFTER_MOVE; activeDots.add(td);
+                dot.state = STATE_LIGHTENING_TO_MOVE;
+              } else { dot.state = STATE_DECAYING; }
+            } else { dot.state = STATE_DECAYING; }
+          }
+          break;
+        case STATE_LIGHTENING_TO_MOVE: case STATE_DECAYING:
+          dot.progress -= speed;
+          if (dot.progress <= 0) remove.push(dot);
+          break;
+        case STATE_DARKENING_AFTER_MOVE:
+          dot.progress += speed;
+          if (dot.progress >= 1) {
+            dot.progress = 1; dot.state = STATE_WAITING;
+            dot.waitUntil = now + minWaitTime + Math.random() * (maxWaitTime - minWaitTime);
+          }
+          break;
+        case STATE_FLEEING: {
+          const dur = 1200, moveDur = 400;
+          const elapsed = now - (dot.fleeStartTime || 0);
+          if (elapsed < moveDur && dot.fleeOriginX !== undefined) {
+            const t = 1 - Math.pow(1 - Math.min(1, elapsed / moveDur), 3);
+            dot.drawX = dot.fleeOriginX! + (dot.fleeTargetX! - dot.fleeOriginX!) * t;
+            dot.drawY = dot.fleeOriginY! + (dot.fleeTargetY! - dot.fleeOriginY!) * t;
+          } else { dot.drawX = dot.fleeTargetX ?? dot.x; dot.drawY = dot.fleeTargetY ?? dot.y; }
+          if (elapsed < dur * 0.15) { dot.progress = Math.min(1, elapsed / (dur * 0.15)); }
+          else if (elapsed < dur) { dot.progress = Math.max(0, 1 - (elapsed - dur * 0.15) / (dur * 0.85)); }
+          else { dot.drawX = undefined; dot.drawY = undefined; remove.push(dot); }
+          break;
+        }
+      }
+    }
+    for (const d of remove) deactivateDot(d);
+  }
+
+  function resizeCanvas() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+  const onResize = () => { clearTimeout(resizeTimeout); resizeTimeout = window.setTimeout(() => { resizeCanvas(); initDots(); }, 200); };
+  window.addEventListener("resize", onResize);
+
+  function animate() { update(); draw(); animFrameId = requestAnimationFrame(animate); }
+
+  resizeCanvas();
+  initDots();
+  spawnInterval = window.setInterval(spawnWanderers, checkInterval);
+  animate();
+
+  return () => {
+    cancelAnimationFrame(animFrameId);
+    clearInterval(spawnInterval);
+    clearTimeout(resizeTimeout);
+    window.removeEventListener("resize", onResize);
+    void onMouseMove;
+  };
+}
+
 function App() {
   const [apiKey, setApiKey] = useState("");
   const [savedApiKey, setSavedApiKey] = useState("");
@@ -107,6 +309,15 @@ function App() {
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const [appVersion, setAppVersion] = useState("");
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+
+  // App mode state
+  const particleCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [appMode, setAppMode] = useState<"onboarding" | "dashboard" | "settings">("onboarding");
+  const [onboardingStep, setOnboardingStep] = useState<1 | 2 | 3>(1);
+  const [onboardingTab, setOnboardingTab] = useState<"claude-code" | "claude-desktop" | "cursor" | "other">("claude-code");
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationError, setValidationError] = useState("");
+  const [configLoaded, setConfigLoaded] = useState(false);
 
   useEffect(() => {
     loadConfig();
@@ -170,6 +381,18 @@ function App() {
       return () => clearInterval(interval);
     }
   }, [activeSection]);
+
+  useEffect(() => {
+    if (appMode === "dashboard" && configLoaded) {
+      void loadBackups();
+    }
+  }, [appMode, configLoaded]);
+
+  useEffect(() => {
+    if ((appMode === "dashboard" || appMode === "onboarding") && particleCanvasRef.current) {
+      return initParticleBackground(particleCanvasRef.current);
+    }
+  }, [appMode]);
 
   const loadCacheStatus = async () => {
     if (!savedApiKey) return;
@@ -413,6 +636,7 @@ function App() {
         if (config.apiKey) {
           setSavedApiKey(config.apiKey);
           setApiKey(config.apiKey);
+          setAppMode("dashboard");
           addLog("API key loaded from config", "success");
         }
         if (config.serverDescription) {
@@ -437,6 +661,7 @@ function App() {
     } catch (e) {
       console.error("Error loading config:", e);
     }
+    setConfigLoaded(true);
   };
 
   const loadServerPath = async () => {
@@ -691,6 +916,8 @@ function App() {
       await saveConfig(buildConfig({}, { includeApiKey: false }));
       setApiKey("");
       setSavedApiKey("");
+      setAppMode("onboarding");
+      setOnboardingStep(1);
       addLog("API key cleared", "info");
       showToast("API key cleared", "success");
     } catch (e) {
@@ -794,6 +1021,50 @@ function App() {
     showToast("Configuration copied to clipboard", "success");
   };
 
+  const onboardingSaveApiKey = async () => {
+    if (!apiKey.trim()) {
+      setValidationError("Please enter an API key");
+      return;
+    }
+    setIsValidating(true);
+    setValidationError("");
+    try {
+      await invoke("validate_api_key", { apiKey: apiKey.trim() });
+      await saveConfig(buildConfig({ apiKey: apiKey.trim() }));
+      setSavedApiKey(apiKey.trim());
+      setOnboardingStep(2);
+      addLog("API key validated and saved", "success");
+    } catch {
+      setValidationError("Invalid API key. Please check your key and try again.");
+    } finally {
+      setIsValidating(false);
+    }
+  };
+
+  const getOnboardingConfig = () => {
+    switch (onboardingTab) {
+      case "claude-code":
+      case "other":
+        return getClaudeCodeConfig();
+      case "claude-desktop":
+        return getClaudeDesktopConfig();
+      case "cursor":
+        return getCursorConfig();
+    }
+  };
+
+  const getOnboardingConfigPath = () => {
+    switch (onboardingTab) {
+      case "claude-code":
+      case "other":
+        return "~/.claude.json";
+      case "claude-desktop":
+        return "~/Library/Application Support/Claude/claude_desktop_config.json";
+      case "cursor":
+        return "~/.cursor/mcp.json";
+    }
+  };
+
   const getClaudeCodeConfig = () => {
     return JSON.stringify(
       {
@@ -875,12 +1146,238 @@ function App() {
     }
   };
 
+  if (!configLoaded) return null;
+
   return (
+    <>
+      {/* ===== ONBOARDING MODE ===== */}
+      {(appMode === "onboarding" || appMode === "dashboard") && (
+        <canvas ref={particleCanvasRef} className="dashboard-particle-canvas" />
+      )}
+
+      {appMode === "onboarding" && (
+        <div className="onboarding-wrapper">
+          <div className="onboarding-card">
+            <div className="onboarding-header">
+              {onboardingStep > 1 && (
+                <button
+                  className="onboarding-back"
+                  onClick={() => setOnboardingStep((onboardingStep - 1) as 1 | 2 | 3)}
+                >
+                  &#8592; Back
+                </button>
+              )}
+              <div className="onboarding-progress">
+                Step {onboardingStep} of 3
+              </div>
+            </div>
+
+            {onboardingStep === 1 && (
+              <div className="onboarding-step">
+                <h2>Add your Workflowy API key</h2>
+                <p className="onboarding-subtitle">
+                  Don't have one?{" "}
+                  <a
+                    href="https://workflowy.com/api-key"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Get your API key
+                  </a>
+                </p>
+
+                <div className="onboarding-input-group">
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => {
+                      setApiKey(e.target.value);
+                      setValidationError("");
+                    }}
+                    placeholder="Paste your API key here"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void onboardingSaveApiKey();
+                    }}
+                  />
+                  {validationError && (
+                    <div className="onboarding-error">{validationError}</div>
+                  )}
+                </div>
+
+                <button
+                  className="button button-primary"
+                  onClick={onboardingSaveApiKey}
+                  disabled={isValidating || !apiKey.trim()}
+                >
+                  {isValidating ? "Validating..." : "Save & Continue"}
+                </button>
+              </div>
+            )}
+
+            {onboardingStep === 2 && (
+              <div className="onboarding-step">
+                <h2>Choose which app you want to use this with</h2>
+                <p className="onboarding-subtitle">
+                  You can connect the MCP to as many apps as you want. Just pick the one you use the most first.
+                </p>
+
+                <div className="onboarding-client-cards">
+                  {([
+                    { id: "claude-code" as const, label: "Claude Code" },
+                    { id: "claude-desktop" as const, label: "Claude Desktop" },
+                    { id: "cursor" as const, label: "Cursor" },
+                    { id: "other" as const, label: "Other" },
+                  ]).map((client) => (
+                    <button
+                      key={client.id}
+                      className={`onboarding-client-card ${onboardingTab === client.id ? "selected" : ""}`}
+                      onClick={() => setOnboardingTab(client.id)}
+                    >
+                      {client.label}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  className="button button-primary"
+                  onClick={() => setOnboardingStep(3)}
+                >
+                  Next
+                </button>
+              </div>
+            )}
+
+            {onboardingStep === 3 && (
+              <div className="onboarding-step">
+                <h2>Add the configuration</h2>
+
+                <div className="onboarding-config-section">
+                  <p className="onboarding-config-path">
+                    Ask your AI to add this MCP server and give them this configuration:
+                  </p>
+                  <div className="config-preview">{getOnboardingConfig()}</div>
+                  <button
+                    className="copy-button"
+                    onClick={() => copyConfig(getOnboardingConfig())}
+                  >
+                    Copy Configuration
+                  </button>
+                  <p className="onboarding-config-manual">
+                    Or manually add this to <code>{getOnboardingConfigPath()}</code>
+                  </p>
+                </div>
+
+                <div className="onboarding-finish-section">
+                  <p className="onboarding-finish-hint">
+                    Once you've added the configuration to your MCP client, you're all set.
+                  </p>
+                  <button
+                    className="button button-primary"
+                    onClick={() => {
+                      setAppMode("dashboard");
+                      void loadBackups();
+                    }}
+                  >
+                    Finish Setup
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ===== DASHBOARD MODE ===== */}
+      {appMode === "dashboard" && (
+        <div className="dashboard-wrapper">
+          {updateAvailable && !updateDismissed && (
+            <div className="dashboard-update-banner">
+              <span>Version {updateAvailable.version} is available</span>
+              <div className="update-actions">
+                <button
+                  className="update-link"
+                  onClick={handleInstallUpdate}
+                  disabled={isCheckingUpdate}
+                >
+                  {isCheckingUpdate ? "Installing..." : "Install Update"}
+                </button>
+                <button
+                  className="update-dismiss"
+                  onClick={() => setUpdateDismissed(true)}
+                  title="Dismiss"
+                >
+                  &times;
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="dashboard-card">
+            <div className="dashboard-header">
+              <h1>Workflowy MCP</h1>
+            </div>
+
+            <div className="dashboard-status">
+              <div className="dashboard-status-dot status-dot-ok" />
+              <span className="dashboard-status-text">Connected</span>
+            </div>
+
+            <div className="dashboard-info-grid">
+              <div className="dashboard-info-item">
+                <span className="dashboard-info-label">Version</span>
+                <span className="dashboard-info-value">v{appVersion || "..."}</span>
+              </div>
+              <div className="dashboard-info-item">
+                <span className="dashboard-info-label">API Key</span>
+                <span className="dashboard-info-value dashboard-info-mono">
+                  {maskApiKey(savedApiKey)}
+                </span>
+              </div>
+              <div className="dashboard-info-item dashboard-info-full">
+                <span className="dashboard-info-label">Last Backup</span>
+                <span className="dashboard-info-value">
+                  {backups.length > 0
+                    ? formatDate(backups[0].created_at)
+                    : "No backups yet"}
+                </span>
+              </div>
+            </div>
+
+            <button
+              className="button button-secondary dashboard-settings-btn"
+              onClick={() => setAppMode("settings")}
+            >
+              Edit Settings
+            </button>
+          </div>
+
+          <a
+            href="https://github.com/rodolfo-terriquez/workflowy-local-mcp"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="dashboard-github-link"
+            title="View on GitHub"
+          >
+            <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+            </svg>
+          </a>
+        </div>
+      )}
+
+      {/* ===== SETTINGS MODE ===== */}
+      {appMode === "settings" && (
     <div className="app-layout">
       {/* Sidebar */}
       <div className="sidebar">
         <div className="sidebar-header">
-          <h1>Workflowy Local MCP</h1>
+          <button
+            className="sidebar-back-btn"
+            onClick={() => setAppMode("dashboard")}
+          >
+            &#8592; Back to Dashboard
+          </button>
+          <h1>Settings</h1>
         </div>
         <div className="sidebar-nav">
           <div
@@ -999,7 +1496,17 @@ function App() {
             <>
               <div className="header">
                 <h1>API Key</h1>
-                <p>Configure your Workflowy API key</p>
+                <p>
+                  Configure your Workflowy API key.{" "}
+                  <a
+                    href="https://workflowy.com/api-key"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="settings-link"
+                  >
+                    Get your API key
+                  </a>
+                </p>
               </div>
 
               {savedApiKey ? (
@@ -1581,13 +2088,16 @@ function App() {
             </>
           )}
 
-          {/* Toast */}
-          {toast && (
-            <div className={`toast ${toast.type}`}>{toast.message}</div>
-          )}
         </div>
       </div>
     </div>
+      )}
+
+      {/* Toast (global) */}
+      {toast && (
+        <div className={`toast ${toast.type}`}>{toast.message}</div>
+      )}
+    </>
   );
 }
 
