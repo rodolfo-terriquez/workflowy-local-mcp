@@ -17,7 +17,7 @@ export const defaultServerInstructions = `This MCP server connects to a user's W
 
 ## Key Concepts
 - Nodes are identified by 12-character hex tags (e.g., "b605f0e85a4a")
-- Nodes can have: name (text), type (h1/h2/h3/todo/bullets/code/quote/table/p), completion status (x: 1 or 0)
+- Nodes can have: name (text), note/description (d), type (h1/h2/h3/todo/bullets/code/quote/table/p), completion status (x: 1 or 0)
 - Children are nested in the "c" array
 - Special targets: \`today\`, \`tomorrow\`, \`next_week\`, \`inbox\`, \`None\` (home/root)
 - Calendar IDs are also valid node IDs: \`YYYY\`, \`YYYY-MM\`, \`YYYY-MM-DD\`
@@ -28,9 +28,10 @@ The API returns tag-as-key JSON. Example:
 \`\`\`json
 {
   "b605f0e85a4a": "My Project",
+  "d": "Project description/note text",
   "c": [
     {"aa11bb22cc33": "Task 1", "l": "todo", "x": 1},
-    {"dd44ee55ff66": "Task 2", "l": "todo"},
+    {"dd44ee55ff66": "Task 2", "d": "Some note on this task", "l": "todo"},
     {"7788990011ab": "Notes", "c": [...], "+": 1}
   ],
   "ancestors": [{"None": "Home"}]
@@ -38,6 +39,7 @@ The API returns tag-as-key JSON. Example:
 \`\`\`
 
 - The first key-value is the node's tag and name
+- \`d\` is the node's note/description text (only present if the node has a note)
 - \`c\` contains children
 - \`l\` is the line type (todo, h1, h2, h3, bullets, code, quote, table, p)
 - \`x: 1\` means completed
@@ -48,13 +50,13 @@ The API returns tag-as-key JSON. Example:
 
 **Insert** — Create new nodes:
 \`\`\`json
-{"op": "insert", "under": "today", "items": [{"n": "New task", "l": "todo"}], "position": "top"}
+{"op": "insert", "under": "today", "items": [{"n": "New task", "d": "Note text", "l": "todo"}], "position": "top"}
 \`\`\`
 Insert can also use \`"after": "<sibling-tag>"\` instead of \`under\` to place items after a specific sibling. Exactly one of \`under\` or \`after\` is required.
 
 **Update** — Modify existing nodes (requires prior read):
 \`\`\`json
-{"op": "update", "ref": "aa11bb22cc33", "to": {"n": "Renamed", "x": 1}}
+{"op": "update", "ref": "aa11bb22cc33", "to": {"n": "Renamed", "d": "Updated note", "x": 1}}
 \`\`\`
 
 **Delete** — Remove nodes (requires prior read):
@@ -115,6 +117,7 @@ edit_doc(root="today", operations=[{"op": "insert", "under": "today", "items": [
 | \`code\` | Code block |
 | \`quote\` | Quote block |
 | \`table\` | Table (children are columns; each column's children are cells/rows) |
+
 
 ## Tables
 
@@ -203,6 +206,7 @@ The response contains:
 
 **Response format:**
 - First key-value is the node's tag and name
+- "d" is the node's note/description text (only present if the node has a note)
 - "c" array contains children
 - "l" is line type (todo, h1, h2, h3, p, bullets, code, quote, table)
 - "x": 1 means completed
@@ -218,11 +222,11 @@ The response contains:
 **Operations:**
 
 INSERT — Create new nodes (use "under" OR "after", exactly one is required):
-\`{"op": "insert", "under": "<tag>|today|inbox", "items": [{"n": "Name", "l": "todo"}], "position": "top|bottom"}\`
+\`{"op": "insert", "under": "<tag>|today|inbox", "items": [{"n": "Name", "d": "Note text", "l": "todo"}], "position": "top|bottom"}\`
 \`{"op": "insert", "after": "<sibling-tag>", "items": [{"n": "Name"}]}\`
 
 UPDATE — Modify existing nodes (requires prior read_doc):
-\`{"op": "update", "ref": "<tag>", "to": {"n": "New name", "l": "h1", "x": 1}}\`
+\`{"op": "update", "ref": "<tag>", "to": {"n": "New name", "d": "Updated note", "l": "h1", "x": 1}}\`
 
 DELETE — Remove nodes (requires prior read_doc):
 \`{"op": "delete", "ref": "<tag>"}\`
@@ -236,6 +240,7 @@ MOVE — Move a node with all children to a new parent (requires prior read_doc)
 
 **Item properties:**
 - n: Name/text content (required for insert)
+- d: Note/description text
 - l: Line type (todo, h1, h2, h3, p, bullets, code, quote, table)
 - x: Completion status (1 = complete, 0 = incomplete)
 - c: Children array for nested structures
