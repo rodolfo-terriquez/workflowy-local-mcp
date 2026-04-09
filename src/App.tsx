@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import "./App.css";
 import { defaultServerInstructions, defaultTools } from "../shared/constants";
-import { checkForAppUpdatesOnLaunch, installUpdate, skipVersion, getAvailableAppUpdate } from "./services/updater";
+import { checkForAppUpdatesOnLaunch, installUpdate, skipVersion, getAvailableAppUpdate, type UpdateProgress } from "./services/updater";
 
 interface LogEntry {
   id: number;
@@ -309,6 +309,7 @@ function App() {
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const [appVersion, setAppVersion] = useState("");
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
 
   // App mode state
   const particleCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -524,18 +525,40 @@ function App() {
     }
   };
 
+  const getUpdateButtonText = () => {
+    if (!updateProgress) return isCheckingUpdate ? "Checking..." : "Install Update";
+    if (updateProgress.phase === "installing") return "Installing...";
+    if (updateProgress.phase === "downloading") {
+      if (updateProgress.contentLength && updateProgress.downloaded) {
+        const pct = Math.round((updateProgress.downloaded / updateProgress.contentLength) * 100);
+        return `Downloading... ${pct}%`;
+      }
+      return "Downloading...";
+    }
+    return "Install Update";
+  };
+
   const handleInstallUpdate = async () => {
     setIsCheckingUpdate(true);
+    setUpdateProgress(null);
     try {
-      const result = await installUpdate();
+      const result = await installUpdate((progress) => {
+        setUpdateProgress(progress);
+      });
       if (result.status === "up-to-date") {
         setUpdateAvailable(null);
         showToast("You're on the latest version!", "success");
+      } else if (result.status === "disabled") {
+        showToast("Updates are not available in development mode", "error");
       } else if (result.status === "error") {
-        showToast(`Update failed: ${result.message}`, "error");
+        showToast(result.message || "Update failed", "error");
       }
+    } catch (e) {
+      console.error("Unexpected update error:", e);
+      showToast(`Update failed unexpectedly: ${e}`, "error");
     } finally {
       setIsCheckingUpdate(false);
+      setUpdateProgress(null);
     }
   };
 
@@ -1302,7 +1325,7 @@ function App() {
                   onClick={handleInstallUpdate}
                   disabled={isCheckingUpdate}
                 >
-                  {isCheckingUpdate ? "Installing..." : "Install Update"}
+                  {getUpdateButtonText()}
                 </button>
                 <button
                   className="update-dismiss"
@@ -1448,7 +1471,7 @@ function App() {
                 onClick={handleInstallUpdate}
                 disabled={isCheckingUpdate}
               >
-                {isCheckingUpdate ? "Installing..." : "Install Update"}
+                {getUpdateButtonText()}
               </button>
             </div>
           )}
