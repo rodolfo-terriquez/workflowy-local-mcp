@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import "./App.css";
 import { defaultServerInstructions, defaultTools } from "../shared/constants";
-import { checkForAppUpdatesOnLaunch, checkForAppUpdatesManually, getAvailableAppUpdate } from "./services/updater";
+import { checkForAppUpdatesOnLaunch, installUpdate, skipVersion, getAvailableAppUpdate } from "./services/updater";
 
 interface LogEntry {
   id: number;
@@ -527,20 +527,23 @@ function App() {
   const handleInstallUpdate = async () => {
     setIsCheckingUpdate(true);
     try {
-      const result = await checkForAppUpdatesManually();
-      if (result.status === "installed") {
-        setUpdateAvailable(null);
-      } else if (result.status === "declined") {
-        setUpdateDismissed(true);
-      } else if (result.status === "up-to-date") {
+      const result = await installUpdate();
+      if (result.status === "up-to-date") {
         setUpdateAvailable(null);
         showToast("You're on the latest version!", "success");
       } else if (result.status === "error") {
-        showToast(`Update check failed: ${result.message}`, "error");
+        showToast(`Update failed: ${result.message}`, "error");
       }
     } finally {
       setIsCheckingUpdate(false);
     }
+  };
+
+  const handleDismissUpdate = () => {
+    if (updateAvailable) {
+      skipVersion(updateAvailable.version);
+    }
+    setUpdateDismissed(true);
   };
 
   const clearAllLogs = async () => {
@@ -1303,7 +1306,7 @@ function App() {
                 </button>
                 <button
                   className="update-dismiss"
-                  onClick={() => setUpdateDismissed(true)}
+                  onClick={handleDismissUpdate}
                   title="Dismiss"
                 >
                   &times;
@@ -1418,6 +1421,7 @@ function App() {
             onClick={() => setActiveSection("backups")}
           >
             <span>Backups</span>
+            <span className="tag-experimental">Experimental</span>
           </div>
           <div
             className={`nav-item ${activeSection === "general" ? "active" : ""}`}
@@ -1429,23 +1433,23 @@ function App() {
         <div className="sidebar-footer">
           {updateAvailable && !updateDismissed && (
             <div className="update-banner">
-              <span>v{updateAvailable.version} available</span>
-              <div className="update-actions">
-                <button 
-                  className="update-link" 
-                  onClick={handleInstallUpdate}
-                  disabled={isCheckingUpdate}
-                >
-                  {isCheckingUpdate ? "Installing..." : "Install"}
-                </button>
+              <div className="update-banner-header">
+                <span>v{updateAvailable.version} available</span>
                 <button 
                   className="update-dismiss" 
-                  onClick={() => setUpdateDismissed(true)}
+                  onClick={handleDismissUpdate}
                   title="Dismiss"
                 >
                   ×
                 </button>
               </div>
+              <button 
+                className="update-link update-link-full" 
+                onClick={handleInstallUpdate}
+                disabled={isCheckingUpdate}
+              >
+                {isCheckingUpdate ? "Installing..." : "Install Update"}
+              </button>
             </div>
           )}
           <span className="version">v{appVersion || "unknown"}</span>
@@ -1914,8 +1918,9 @@ function App() {
                       export requests to 1 per minute.
                     </p>
                     <p style={{ marginTop: "8px" }}>
-                      <strong>Backups:</strong> Daily snapshots are available in
-                      the <code>Backups</code> tab.
+                      <strong>Backups:</strong> A daily snapshot is created
+                      automatically when an AI app uses the MCP server. View
+                      them in the <code>Backups</code> tab.
                     </p>
                   </div>
                 </>
@@ -1929,8 +1934,9 @@ function App() {
               <div className="header">
                 <h1>Backups</h1>
                 <p>
-                  Daily full-account Workflowy export snapshots stored locally
-                  by the MCP server.
+                  When an AI app uses the MCP server, it automatically creates
+                  a daily snapshot of your Workflowy account stored locally on
+                  your machine.
                 </p>
               </div>
 

@@ -1,4 +1,5 @@
 import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 const SKIPPED_VERSION_KEY = "workflowy-mcp.skippedUpdateVersion";
 
@@ -8,7 +9,6 @@ type AppUpdateCheckStatus =
   | "disabled"
   | "up-to-date"
   | "skipped"
-  | "declined"
   | "installed"
   | "error";
 
@@ -26,10 +26,6 @@ export interface AppUpdateAvailabilityResult {
   message?: string;
 }
 
-interface RunAppUpdateCheckOptions {
-  respectSkippedVersion?: boolean;
-}
-
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -40,9 +36,27 @@ function getErrorMessage(error: unknown): string {
   return "Unknown updater error";
 }
 
-async function runAppUpdateCheck(
-  { respectSkippedVersion = true }: RunAppUpdateCheckOptions = {}
-): Promise<AppUpdateCheckResult> {
+async function silentCheckOnLaunch(): Promise<void> {
+  if (import.meta.env.DEV) return;
+
+  let update: Awaited<ReturnType<typeof check>> = null;
+
+  try {
+    update = await check();
+    if (!update) return;
+
+    const skippedVersion = localStorage.getItem(SKIPPED_VERSION_KEY);
+    if (skippedVersion === update.version) return;
+  } catch (error) {
+    console.log("[updater] Launch check failed:", error);
+  } finally {
+    if (update) {
+      await update.close().catch(() => {});
+    }
+  }
+}
+
+export async function installUpdate(): Promise<AppUpdateCheckResult> {
   if (import.meta.env.DEV) {
     return { status: "disabled", message: "Updater is disabled in development builds." };
   }
@@ -53,30 +67,14 @@ async function runAppUpdateCheck(
     update = await check();
     if (!update) return { status: "up-to-date" };
 
-    if (respectSkippedVersion) {
-      const skippedVersion = localStorage.getItem(SKIPPED_VERSION_KEY);
-      if (skippedVersion === update.version) {
-        return { status: "skipped", version: update.version };
-      }
-    }
-
-    const shouldInstall = confirm(
-      `A new update is available (v${update.version}).\n\nInstall it now? The app will restart after installing.`
-    );
-
-    if (!shouldInstall) {
-      localStorage.setItem(SKIPPED_VERSION_KEY, update.version);
-      return { status: "declined", version: update.version };
-    }
-
     await update.downloadAndInstall();
     localStorage.removeItem(SKIPPED_VERSION_KEY);
 
-    alert("Update installed. Please restart the app to finish applying it.");
+    await relaunch();
     return { status: "installed", version: update.version };
   } catch (error) {
     const message = getErrorMessage(error);
-    console.error("[updater] Failed to check for updates:", error);
+    console.error("[updater] Failed to install update:", error);
     return { status: "error", message };
   } finally {
     if (update) {
@@ -89,11 +87,11 @@ export async function checkForAppUpdatesOnLaunch(): Promise<void> {
   if (hasCheckedThisRun || import.meta.env.DEV) return;
   hasCheckedThisRun = true;
 
-  await runAppUpdateCheck({ respectSkippedVersion: true });
+  await silentCheckOnLaunch();
 }
 
-export async function checkForAppUpdatesManually(): Promise<AppUpdateCheckResult> {
-  return runAppUpdateCheck({ respectSkippedVersion: false });
+export function skipVersion(version: string): void {
+  localStorage.setItem(SKIPPED_VERSION_KEY, version);
 }
 
 export async function getAvailableAppUpdate(): Promise<AppUpdateAvailabilityResult> {
