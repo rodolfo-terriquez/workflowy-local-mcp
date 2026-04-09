@@ -545,7 +545,10 @@ function App() {
       const result = await installUpdate((progress) => {
         setUpdateProgress(progress);
       });
-      if (result.status === "up-to-date") {
+      if (result.status === "installed") {
+        setUpdateAvailable(null);
+        showToast(result.message || "Update installed! Restarting...", "success");
+      } else if (result.status === "up-to-date") {
         setUpdateAvailable(null);
         showToast("You're on the latest version!", "success");
       } else if (result.status === "disabled") {

@@ -99,7 +99,11 @@ export async function installUpdate(
     await update.install();
     localStorage.removeItem(SKIPPED_VERSION_KEY);
 
-    await relaunch();
+    try {
+      await relaunch();
+    } catch {
+      return { status: "installed", version: update.version, message: "Update installed! Please restart the app to finish." };
+    }
     return { status: "installed", version: update.version };
   } catch (error) {
     const msg = getErrorMessage(error);
