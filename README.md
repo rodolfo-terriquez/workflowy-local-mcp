@@ -25,10 +25,7 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
    - **macOS**: `.dmg` file
    - **Windows**: `.msi` or `.exe` installer
 
-2. **macOS users**: The app is unsigned, so you'll need to bypass Gatekeeper:
-   - **Option 1**: Right-click the app → select "Open" → click "Open" in the dialog
-   - **Option 2**: Run `xattr -cr /path/to/Workflowy\ Local\ MCP.app` in Terminal
-   - If you see "damaged and can't be opened", use Option 2
+2. **macOS users**: The app is signed, so you can install and open it normally from the downloaded `.dmg`
 
 3. Open the app and enter your Workflowy API key
    - Get one at [workflowy.com/api-reference](https://beta.workflowy.com/api-reference/)
