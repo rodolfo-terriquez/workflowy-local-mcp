@@ -174,4 +174,14 @@ jobs:
 
       - name: Build Tauri app (manual preflight)
         if: github.event_name == 'workflow_dispatch'
-        run: npm run tauri build -- ${{ matrix.args }}
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ARGS="${{ matrix.args }}"
+          ARGS="${ARGS//,updater/}"
+          ARGS="${ARGS//updater,/}"
+          ARGS="${ARGS//updater/}"
+          npm run tauri build -- $ARGS
