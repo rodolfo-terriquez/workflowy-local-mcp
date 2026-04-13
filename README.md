@@ -23,16 +23,19 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 
 1. Download the latest release from [GitHub Releases](../../releases)
    - **macOS**: choose the `.dmg` for your Mac (`Apple Silicon` or `Intel`)
+   - **Linux**: download the `.AppImage` for x64 Linux
    - **Windows**: `.msi` or `.exe` installer
 
 2. **macOS users**: The app is signed, so you can install and open the matching `.dmg` normally
 
-3. Open the app and enter your Workflowy API key
+3. **Linux users**: make the AppImage executable (`chmod +x`) and run it directly
+
+4. Open the app and enter your Workflowy API key
    - Get one at [workflowy.com/api-reference](https://beta.workflowy.com/api-reference/)
 
-4. Go to the **Setup** tab and follow the instructions for your MCP client (Claude Code, Claude Desktop, Cursor, or any app that supports MCP)
+5. Go to the **Setup** tab and follow the instructions for your MCP client (Claude Code, Claude Desktop, Cursor, or any app that supports MCP)
 
-5. Restart your MCP client — the Workflowy tools are now available
+6. Restart your MCP client — the Workflowy tools are now available
 
 ## Available Tools
 
