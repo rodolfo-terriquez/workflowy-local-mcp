@@ -22,10 +22,10 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 ## Installation
 
 1. Download the latest release from [GitHub Releases](../../releases)
-   - **macOS**: `.dmg` file
+   - **macOS**: choose the `.dmg` for your Mac (`Apple Silicon` or `Intel`)
    - **Windows**: `.msi` or `.exe` installer
 
-2. **macOS users**: The app is signed, so you can install and open it normally from the downloaded `.dmg`
+2. **macOS users**: The app is signed, so you can install and open the matching `.dmg` normally
 
 3. Open the app and enter your Workflowy API key
    - Get one at [workflowy.com/api-reference](https://beta.workflowy.com/api-reference/)

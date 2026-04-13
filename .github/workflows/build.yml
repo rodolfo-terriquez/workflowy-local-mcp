@@ -13,10 +13,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS ARM (Apple Silicon)
-          - platform: macos-14
+          # macOS Apple Silicon release artifacts
+          - platform: macos-15
             args: --target aarch64-apple-darwin --bundles app,dmg,updater
             rust_target: aarch64-apple-darwin
+          # macOS Intel release artifacts
+          - platform: macos-15-intel
+            args: --target x86_64-apple-darwin --bundles app,dmg,updater
+            rust_target: x86_64-apple-darwin
           # Windows x64
           - platform: windows-latest
             args: ""
