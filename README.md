@@ -22,20 +22,24 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 ## Installation
 
 1. Download the latest release from [GitHub Releases](../../releases)
-   - **macOS**: choose the `.dmg` for your Mac (`Apple Silicon` or `Intel`)
-   - **Linux**: download the `.AppImage` for x64 Linux
-   - **Windows**: `.msi` or `.exe` installer
+   - **macOS (Apple Silicon)**: download the `aarch64.dmg` file
+   - **macOS (Intel)**: download the `x64.dmg` file
+   - **Linux (x64)**: download the `amd64.AppImage` file
+   - **Windows (x64)**: download either the `.msi` installer or the `.exe` setup file
+   - Ignore `.sig`, `.tar.gz`, and `latest.json` files unless you are debugging updates or verifying signatures manually
 
 2. **macOS users**: The app is signed, so you can install and open the matching `.dmg` normally
 
-3. **Linux users**: make the AppImage executable (`chmod +x`) and run it directly
+3. **Linux users**: make the AppImage executable (`chmod +x Workflowy.MCP_*_amd64.AppImage`) and run it directly
 
-4. Open the app and enter your Workflowy API key
+4. **Windows users**: the `.msi` is the standard Windows installer; the `.exe` is an alternative setup package for the same x64 build
+
+5. Open the app and enter your Workflowy API key
    - Get one at [workflowy.com/api-reference](https://beta.workflowy.com/api-reference/)
 
-5. Go to the **Setup** tab and follow the instructions for your MCP client (Claude Code, Claude Desktop, Cursor, or any app that supports MCP)
+6. Go to the **Setup** tab and follow the instructions for your MCP client (Claude Code, Claude Desktop, Cursor, or any app that supports MCP)
 
-6. Restart your MCP client — the Workflowy tools are now available
+7. Restart your MCP client — the Workflowy tools are now available
 
 ## Available Tools
 
