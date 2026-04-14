@@ -79,6 +79,101 @@ struct McpLogEntry {
     source: String,
 }
 
+#[derive(Deserialize)]
+struct AccountConfig {
+    id: Option<String>,
+    name: Option<String>,
+    #[serde(rename = "apiKey")]
+    api_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AppConfig {
+    #[serde(rename = "apiKey")]
+    api_key: Option<String>,
+    accounts: Option<Vec<AccountConfig>>,
+    #[serde(rename = "defaultAccountId")]
+    default_account_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct ResolvedAccount {
+    id: String,
+}
+
+fn load_app_config(app_data: &PathBuf) -> Result<AppConfig, String> {
+    let config_path = app_data.join("config.json");
+    if !config_path.exists() {
+        return Ok(AppConfig {
+            api_key: None,
+            accounts: None,
+            default_account_id: None,
+        });
+    }
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read config.json: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse config.json: {}", e))
+}
+
+fn resolve_account(app_data: &PathBuf, account_id: Option<String>) -> Result<ResolvedAccount, String> {
+    let config = load_app_config(app_data)?;
+
+    if let Some(accounts) = config.accounts {
+        let valid_accounts: Vec<ResolvedAccount> = accounts
+            .into_iter()
+            .filter_map(|account| {
+                let id = account.id?;
+                let name = account.name.unwrap_or_default();
+                let api_key = account.api_key.unwrap_or_default();
+                if id.trim().is_empty() || name.trim().is_empty() || api_key.trim().is_empty() {
+                    None
+                } else {
+                    Some(ResolvedAccount { id })
+                }
+            })
+            .collect();
+
+        if valid_accounts.is_empty() {
+            return Ok(ResolvedAccount {
+                id: "default".to_string(),
+            });
+        }
+
+        if let Some(requested_id) = account_id {
+            if let Some(account) = valid_accounts.iter().find(|account| account.id == requested_id) {
+                return Ok(account.clone());
+            }
+        }
+
+        if let Some(default_id) = config.default_account_id {
+            if let Some(account) = valid_accounts.iter().find(|account| account.id == default_id) {
+                return Ok(account.clone());
+            }
+        }
+
+        return Ok(valid_accounts[0].clone());
+    }
+
+    if config.api_key.unwrap_or_default().trim().is_empty() {
+        return Ok(ResolvedAccount {
+            id: "default".to_string(),
+        });
+    }
+
+    Ok(ResolvedAccount {
+        id: "default".to_string(),
+    })
+}
+
+fn account_data_dir(app_data: &PathBuf, account: &ResolvedAccount) -> PathBuf {
+    if account.id == "default" {
+        app_data.clone()
+    } else {
+        app_data.join(&account.id)
+    }
+}
+
 /// Run database migrations to ensure schema is up to date
 fn run_migrations(conn: &Connection) -> Result<(), String> {
     // Check if context column exists in bookmarks table
@@ -102,12 +197,13 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_bookmarks(app_handle: tauri::AppHandle) -> Result<Vec<Bookmark>, String> {
+fn get_bookmarks(app_handle: tauri::AppHandle, account_id: Option<String>) -> Result<Vec<Bookmark>, String> {
     let app_data = app_handle
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-    let db_path = app_data.join("bookmarks.db");
+    let account = resolve_account(&app_data, account_id)?;
+    let db_path = account_data_dir(&app_data, &account).join("bookmarks.db");
 
     if !db_path.exists() {
         return Ok(vec![]);
@@ -139,12 +235,13 @@ fn get_bookmarks(app_handle: tauri::AppHandle) -> Result<Vec<Bookmark>, String> 
 }
 
 #[tauri::command]
-fn delete_bookmark(app_handle: tauri::AppHandle, name: String) -> Result<(), String> {
+fn delete_bookmark(app_handle: tauri::AppHandle, account_id: Option<String>, name: String) -> Result<(), String> {
     let app_data = app_handle
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-    let db_path = app_data.join("bookmarks.db");
+    let account = resolve_account(&app_data, account_id)?;
+    let db_path = account_data_dir(&app_data, &account).join("bookmarks.db");
 
     if !db_path.exists() {
         return Err("Database not found".to_string());
@@ -161,6 +258,7 @@ fn delete_bookmark(app_handle: tauri::AppHandle, name: String) -> Result<(), Str
 #[tauri::command]
 fn update_bookmark_context(
     app_handle: tauri::AppHandle,
+    account_id: Option<String>,
     name: String,
     context: Option<String>,
 ) -> Result<(), String> {
@@ -168,7 +266,8 @@ fn update_bookmark_context(
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-    let db_path = app_data.join("bookmarks.db");
+    let account = resolve_account(&app_data, account_id)?;
+    let db_path = account_data_dir(&app_data, &account).join("bookmarks.db");
 
     if !db_path.exists() {
         return Err("Database not found".to_string());

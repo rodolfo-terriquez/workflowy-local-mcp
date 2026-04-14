@@ -23,6 +23,30 @@ body {
     display: flex;
     height: 100vh;
     overflow: hidden;
+    position: relative;
+    z-index: 1;
+    --settings-surface: rgba(0, 0, 0, 0.2);
+    --settings-surface-hover: rgba(255, 255, 255, 0.05);
+    --settings-surface-soft: rgba(255, 255, 255, 0.03);
+    --settings-control-bg: rgba(0, 0, 0, 0.3);
+    --settings-border: rgba(255, 255, 255, 0.08);
+    --settings-control-border: rgba(255, 255, 255, 0.1);
+    --settings-button-border: rgba(255, 255, 255, 0.2);
+    --settings-text: #e0e0e0;
+    --settings-muted: #888;
+    --settings-muted-strong: #666;
+    --settings-accent: #a5a8fc;
+    --settings-success: #86efac;
+    --settings-danger: #f87171;
+    --settings-primary: #6366f1;
+    --settings-primary-hover: #5558e3;
+    --settings-disabled-bg: #3a3a5a;
+    --settings-card-radius: 8px;
+    --settings-control-radius: 8px;
+    --settings-button-radius: 6px;
+    --settings-card-padding: 16px;
+    --settings-button-padding: 8px 12px;
+    --settings-button-font-size: 12px;
 }
 
 .sidebar {
@@ -273,7 +297,7 @@ body {
     border: 1px solid rgba(99, 102, 241, 0.3);
     border-radius: 8px;
     padding: 14px;
-    margin-top: 16px;
+    margin: 16px 0;
 }
 
 .info-box.success {
@@ -285,6 +309,10 @@ body {
     font-size: 13px;
     line-height: 1.5;
     color: #a5a8fc;
+}
+
+.info-box > :last-child {
+    margin-bottom: 0;
 }
 
 .info-box.success p {
@@ -464,6 +492,21 @@ body {
 
 .copy-button:hover {
     background: rgba(255, 255, 255, 0.15);
+}
+
+.app-layout .button,
+.app-layout .copy-button,
+.app-layout .tab,
+.app-layout .button-small,
+.app-layout .reset-button,
+.app-layout .update-link {
+    padding: var(--settings-button-padding);
+    border-radius: var(--settings-button-radius);
+    font-size: var(--settings-button-font-size);
+}
+
+.app-layout .button-small {
+    flex: 0 0 auto;
 }
 
 .config-preview {
@@ -741,9 +784,9 @@ body {
 }
 
 .bookmarks-list {
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 8px;
-    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
 }
 
 .bookmarks-table {
@@ -831,7 +874,6 @@ body {
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 8px;
     padding: 16px;
-    margin-bottom: 12px;
 }
 
 .bookmark-card-header {
@@ -850,10 +892,6 @@ body {
 .bookmark-date {
     font-size: 12px;
     color: #666;
-}
-
-.bookmark-node-id {
-    margin-bottom: 12px;
 }
 
 .bookmark-node-id code {
@@ -888,7 +926,6 @@ body {
 
 .bookmark-context-display {
     display: flex;
-    gap: 12px;
     align-items: flex-start;
 }
 
@@ -944,9 +981,15 @@ body {
 
 .bookmark-card-actions {
     display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.bookmark-card-buttons {
+    display: flex;
+    gap: 8px;
     justify-content: flex-end;
-    padding-top: 8px;
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 /* Cache Status Styles */
@@ -959,6 +1002,22 @@ body {
 }
 
 .cache-status h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: #888;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.settings-section-block {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.settings-section-title {
     font-size: 14px;
     font-weight: 600;
     color: #888;
@@ -1009,11 +1068,17 @@ body {
     flex: 1;
 }
 
+.settings-section-block > .cache-actions,
+.settings-section-block > .backup-list-footnote {
+    margin-bottom: 0;
+    margin-top: 0;
+}
+
 .backup-directory {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin: 14px 0 16px;
+    margin: 0;
 }
 
 .backup-retention-row {
@@ -1034,7 +1099,8 @@ body {
     min-width: 280px;
 }
 
-.backup-retention-actions .button {
+.backup-retention-actions .button,
+.backup-page-actions .button {
     flex: 1;
 }
 
@@ -1066,6 +1132,10 @@ body {
     gap: 12px;
 }
 
+.backup-list-footnote {
+    margin-top: 12px;
+}
+
 .backup-card {
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1095,25 +1165,6 @@ body {
     margin-top: 4px;
 }
 
-.backup-badge {
-    border-radius: 999px;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    padding: 4px 8px;
-    text-transform: uppercase;
-}
-
-.backup-badge.daily {
-    background: rgba(34, 197, 94, 0.15);
-    color: #86efac;
-}
-
-.backup-badge.manual {
-    background: rgba(99, 102, 241, 0.15);
-    color: #a5a8fc;
-}
-
 .backup-meta {
     display: flex;
     flex-wrap: wrap;
@@ -1133,12 +1184,6 @@ body {
     line-height: 1.5;
     padding: 8px 10px;
     word-break: break-all;
-}
-
-.backup-actions {
-    display: flex;
-    justify-content: flex-end;
-    margin-top: 12px;
 }
 
 /* ===== ONBOARDING WIZARD ===== */
@@ -1204,6 +1249,9 @@ body {
 }
 
 .onboarding-input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
     margin-bottom: 20px;
 }
 
@@ -1286,6 +1334,24 @@ body {
     background: rgba(99, 102, 241, 0.15);
     border-color: rgba(99, 102, 241, 0.5);
     color: #a5a8fc;
+}
+
+.onboarding-accounts-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.onboarding-account-card {
+    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 14px;
+}
+
+.onboarding-add-account {
+    margin-bottom: 16px;
 }
 
 .onboarding-config-section {
@@ -1522,4 +1588,258 @@ body {
 .settings-link:hover {
     text-decoration: underline;
     color: #c4c6fd;
+}
+
+.accounts-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-bottom: 20px;
+}
+
+.account-card {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.account-card-header,
+.account-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.account-actions {
+    margin-bottom: 0;
+}
+
+.account-default-choice {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #c8c8d4;
+    font-size: 13px;
+}
+
+.account-field-row {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+}
+
+.account-field-row label {
+    margin-bottom: 0;
+}
+
+.account-field-row input {
+    min-width: 0;
+}
+
+.account-selector {
+    display: inline-block;
+    width: fit-content;
+    min-width: 240px;
+    max-width: 100%;
+    margin-bottom: 18px;
+}
+
+.account-selector-control {
+    position: relative;
+}
+
+.account-selector-control::after {
+    content: "";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    width: 8px;
+    height: 8px;
+    border-right: 2px solid #c8c8d4;
+    border-bottom: 2px solid #c8c8d4;
+    transform: translateY(-65%) rotate(45deg);
+    pointer-events: none;
+}
+
+.account-selector select {
+    appearance: none;
+    width: 100%;
+    min-height: 44px;
+    background: rgba(0, 0, 0, 0.3);
+    color: #e0e0e0;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 12px 38px 12px 14px;
+    font-family: "Geist Mono", monospace;
+    font-size: 14px;
+    line-height: 1.2;
+    cursor: pointer;
+}
+
+.account-selector select:focus {
+    outline: none;
+    border-color: #6366f1;
+}
+
+.app-layout .input-group label,
+.app-layout .tools-list > label,
+.app-layout .instructions p,
+.app-layout .section-hint,
+.app-layout .field-hint,
+.app-layout .cache-status h3,
+.app-layout .bookmark-context-label,
+.app-layout .api-key-label,
+.app-layout .status-label,
+.app-layout .bookmark-date,
+.app-layout .backup-date {
+    color: var(--settings-muted);
+}
+
+.app-layout .input-group input,
+.app-layout .input-group textarea,
+.app-layout .account-selector select,
+.app-layout .description-with-reset textarea,
+.app-layout .bookmark-context-edit textarea {
+    background: var(--settings-control-bg);
+    border: 1px solid var(--settings-control-border);
+    border-radius: var(--settings-control-radius);
+    color: var(--settings-text);
+}
+
+.app-layout .input-group input::placeholder,
+.app-layout .input-group textarea::placeholder,
+.app-layout .description-with-reset textarea::placeholder,
+.app-layout .bookmark-context-edit textarea::placeholder {
+    color: var(--settings-muted-strong);
+}
+
+.app-layout .input-group input:focus,
+.app-layout .input-group textarea:focus,
+.app-layout .account-selector select:focus,
+.app-layout .description-with-reset textarea:focus,
+.app-layout .bookmark-context-edit textarea:focus {
+    border-color: var(--settings-primary);
+}
+
+.app-layout .tool-item,
+.app-layout .bookmark-card,
+.app-layout .cache-status,
+.app-layout .backup-card,
+.app-layout .account-card,
+.app-layout .log-container,
+.app-layout .bookmarks-empty,
+.app-layout .backup-empty {
+    background: var(--settings-surface);
+    border: 1px solid var(--settings-border);
+    border-radius: var(--settings-card-radius);
+}
+
+.app-layout .bookmark-card,
+.app-layout .cache-status,
+.app-layout .backup-card,
+.app-layout .account-card,
+.app-layout .log-container,
+.app-layout .bookmarks-empty,
+.app-layout .backup-empty {
+    padding: var(--settings-card-padding);
+}
+
+.app-layout .bookmark-context-section,
+.app-layout .status-item {
+    background: var(--settings-control-bg);
+    border: 1px solid var(--settings-border);
+    border-radius: var(--settings-control-radius);
+}
+
+.app-layout .status-item {
+    padding: 12px;
+}
+
+.app-layout .tool-header:hover,
+.app-layout .bookmarks-header,
+.app-layout .bookmark-row:hover {
+    background: var(--settings-surface-hover);
+}
+
+.app-layout .config-preview,
+.app-layout .backup-directory code,
+.app-layout .backup-path code,
+.app-layout .bookmark-node-id code,
+.app-layout .bookmark-col-id code {
+    background: var(--settings-control-bg);
+    border: 1px solid var(--settings-border);
+    border-radius: var(--settings-control-radius);
+}
+
+.app-layout .button-primary {
+    background: var(--settings-primary);
+    color: #fff;
+}
+
+.app-layout .button-primary:hover {
+    background: var(--settings-primary-hover);
+}
+
+.app-layout .button-primary:disabled {
+    background: var(--settings-disabled-bg);
+    color: var(--settings-muted-strong);
+}
+
+.app-layout .button-secondary,
+.app-layout .copy-button,
+.app-layout .tab,
+.app-layout .update-link {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid var(--settings-button-border);
+    color: var(--settings-text);
+}
+
+.app-layout .button-secondary:hover,
+.app-layout .copy-button:hover,
+.app-layout .tab:hover,
+.app-layout .update-link:hover {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.app-layout .button-danger,
+.app-layout .reset-button {
+    background: rgba(239, 68, 68, 0.15);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: var(--settings-danger);
+}
+
+.app-layout .button-danger:hover,
+.app-layout .reset-button:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.25);
+}
+
+.app-layout .tab.active {
+    background: rgba(99, 102, 241, 0.2);
+    border-color: rgba(99, 102, 241, 0.5);
+    color: var(--settings-accent);
+}
+
+.app-layout .button-disabled,
+.app-layout .button-disabled:hover,
+.app-layout .reset-button.reset-disabled,
+.app-layout .reset-button:disabled {
+    background: rgba(100, 100, 100, 0.1) !important;
+    border-color: rgba(100, 100, 100, 0.2);
+    color: var(--settings-muted-strong) !important;
+}
+
+@media (max-width: 640px) {
+    .account-field-row {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+        gap: 8px;
+    }
+
+    .account-field-row label {
+        margin-bottom: 0;
+    }
 }

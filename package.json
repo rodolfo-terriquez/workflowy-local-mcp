@@ -1,12 +1,13 @@
 {
   "name": "workflowy-local-mcp",
   "private": true,
-  "version": "1.5.1",
+  "version": "1.5.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "build:mcp": "esbuild mcp-server/server.ts --bundle --platform=node --target=node18 --outfile=dist-mcp/server.cjs --format=cjs",
+    "test:accounts": "node -e \"require('node:fs').mkdirSync('.tmp', { recursive: true })\" && esbuild tests/accounts.test.ts --bundle --platform=node --target=node20 --outfile=.tmp/accounts.test.cjs --format=cjs && node --test .tmp/accounts.test.cjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "mcp-server": "node dist-mcp/server.cjs"

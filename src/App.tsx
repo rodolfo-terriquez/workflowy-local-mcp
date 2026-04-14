@@ -3,6 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import "./App.css";
 import { defaultServerInstructions, defaultTools } from "../shared/constants";
+import {
+  normalizeAccountConfigs,
+  uniqueAccountSlug,
+  isValidAccountName,
+  type StoredAccountConfig,
+} from "../shared/accounts";
 import { checkForAppUpdatesOnLaunch, installUpdate, skipVersion, getAvailableAppUpdate, type UpdateProgress } from "./services/updater";
 
 interface LogEntry {
@@ -49,11 +55,17 @@ interface BackupSnapshot {
   path: string;
 }
 
+type WorkflowyAccount = StoredAccountConfig;
+const DEFAULT_BACKUP_RETENTION_DAYS = 3;
+
 interface AppConfig {
   apiKey?: string;
+  accounts?: WorkflowyAccount[];
+  defaultAccountId?: string;
   serverDescription?: string;
   toolDescriptions?: Record<string, string>;
-  maxBackups?: number;
+  backupRetentionDays?: number | null;
+  maxBackups?: number | null;
 }
 
 function initParticleBackground(canvas: HTMLCanvasElement): () => void {
@@ -259,8 +271,10 @@ function initParticleBackground(canvas: HTMLCanvasElement): () => void {
 }
 
 function App() {
-  const [apiKey, setApiKey] = useState("");
   const [savedApiKey, setSavedApiKey] = useState("");
+  const [accounts, setAccounts] = useState<WorkflowyAccount[]>([]);
+  const [defaultAccountId, setDefaultAccountId] = useState("default");
+  const [selectedAccountId, setSelectedAccountId] = useState("default");
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [toast, setToast] = useState<{
     message: string;
@@ -295,8 +309,12 @@ function App() {
   const [backups, setBackups] = useState<BackupSnapshot[]>([]);
   const [backupsLoading, setBackupsLoading] = useState(false);
   const [backupDirectory, setBackupDirectory] = useState("");
-  const [savedMaxBackups, setSavedMaxBackups] = useState<number | null>(null);
-  const [maxBackupsInput, setMaxBackupsInput] = useState("");
+  const [savedMaxBackups, setSavedMaxBackups] = useState<number | null>(
+    DEFAULT_BACKUP_RETENTION_DAYS,
+  );
+  const [maxBackupsInput, setMaxBackupsInput] = useState(
+    String(DEFAULT_BACKUP_RETENTION_DAYS),
+  );
   const [backupSettingsDirty, setBackupSettingsDirty] = useState(false);
 
   // MCP logs state
@@ -314,11 +332,26 @@ function App() {
   // App mode state
   const particleCanvasRef = useRef<HTMLCanvasElement>(null);
   const [appMode, setAppMode] = useState<"onboarding" | "dashboard" | "settings">("onboarding");
-  const [onboardingStep, setOnboardingStep] = useState<1 | 2 | 3>(1);
+  const [onboardingStep, setOnboardingStep] = useState<1 | 2 | 3 | 4>(1);
+  const [onboardingAccountMode, setOnboardingAccountMode] = useState<"single" | "multiple">("single");
+  const [onboardingAccounts, setOnboardingAccounts] = useState<WorkflowyAccount[]>([
+    { id: "default", name: "Personal", apiKey: "" },
+  ]);
   const [onboardingTab, setOnboardingTab] = useState<"claude-code" | "claude-desktop" | "cursor" | "other">("claude-code");
   const [isValidating, setIsValidating] = useState(false);
   const [validationError, setValidationError] = useState("");
   const [configLoaded, setConfigLoaded] = useState(false);
+
+  const defaultAccount =
+    accounts.find((account) => account.id === defaultAccountId) ?? accounts[0] ?? null;
+  const selectedAccount =
+    accounts.find((account) => account.id === selectedAccountId) ?? defaultAccount;
+  const selectedApiKey = selectedAccount?.apiKey ?? savedApiKey;
+  const dashboardConnectionText =
+    accounts.length === 1
+      ? "Connected to 1 account"
+      : `Connected to ${accounts.length} accounts`;
+  const showParticleCanvas = appMode === "onboarding" || appMode === "dashboard";
 
   useEffect(() => {
     loadConfig();
@@ -355,16 +388,22 @@ function App() {
 
   // Load cache status when cache section is active
   useEffect(() => {
-    if (activeSection === "cache" && savedApiKey) {
+    if (activeSection === "cache" && selectedApiKey) {
       void loadCacheStatus();
     }
-  }, [activeSection, savedApiKey]);
+  }, [activeSection, selectedAccountId, selectedApiKey]);
+
+  useEffect(() => {
+    if (appMode === "settings" && activeSection === "bookmarks") {
+      void loadBookmarks();
+    }
+  }, [appMode, activeSection, selectedAccountId]);
 
   useEffect(() => {
     if (activeSection === "backups") {
       void loadBackups();
     }
-  }, [activeSection]);
+  }, [activeSection, selectedAccountId]);
 
   // Load MCP logs when logs section is active
   useEffect(() => {
@@ -387,23 +426,23 @@ function App() {
     if (appMode === "dashboard" && configLoaded) {
       void loadBackups();
     }
-  }, [appMode, configLoaded]);
+  }, [appMode, configLoaded, selectedAccountId]);
 
   useEffect(() => {
-    if ((appMode === "dashboard" || appMode === "onboarding") && particleCanvasRef.current) {
+    if (showParticleCanvas && particleCanvasRef.current) {
       return initParticleBackground(particleCanvasRef.current);
     }
-  }, [appMode]);
+  }, [showParticleCanvas, configLoaded]);
 
   const loadCacheStatus = async () => {
-    if (!savedApiKey) return;
+    if (!selectedApiKey || !selectedAccount) return;
 
     try {
       const { fetch } = await import("@tauri-apps/plugin-http");
       const response = await fetch("https://workflowy.com/api/v1/targets", {
         method: "GET",
         headers: {
-          Authorization: `Bearer ${savedApiKey}`,
+          Authorization: `Bearer ${selectedApiKey}`,
         },
       });
 
@@ -413,7 +452,7 @@ function App() {
       }
 
       // Read cache status from the database file
-      const dataDir = await getDataDir();
+      const dataDir = await getAccountDataDir(selectedAccount.id);
       const { readFile, exists } = await import("@tauri-apps/plugin-fs");
       const dbPath = dataDir + "/bookmarks.db";
 
@@ -477,7 +516,9 @@ function App() {
         "@tauri-apps/plugin-fs"
       );
 
-      const dataDir = await getDataDir();
+      const dataDir = selectedAccount
+        ? await getAccountDataDir(selectedAccount.id)
+        : await getDataDir();
       const backupsDir = await join(dataDir, "backups");
       setBackupDirectory(backupsDir);
 
@@ -585,7 +626,7 @@ function App() {
   };
 
   const syncNow = async () => {
-    if (!savedApiKey || isSyncing) return;
+    if (!selectedApiKey || isSyncing) return;
 
     setIsSyncing(true);
     addLog("Starting node sync...", "info");
@@ -597,7 +638,7 @@ function App() {
         {
           method: "GET",
           headers: {
-            Authorization: `Bearer ${savedApiKey}`,
+            Authorization: `Bearer ${selectedApiKey}`,
             "Content-Type": "application/json",
           },
         },
@@ -662,11 +703,23 @@ function App() {
       if (await exists(configPath)) {
         const content = await readTextFile(configPath);
         const config = JSON.parse(content) as AppConfig;
-        if (config.apiKey) {
-          setSavedApiKey(config.apiKey);
-          setApiKey(config.apiKey);
+        const normalized = normalizeAccountConfigs(config);
+        if (normalized.accounts.length > 0) {
+          setAccounts(normalized.accounts);
+          const resolvedDefaultId = normalized.defaultAccountId ?? normalized.accounts[0].id;
+          setDefaultAccountId(resolvedDefaultId);
+          setSelectedAccountId(resolvedDefaultId);
+          const resolvedDefault =
+            normalized.accounts.find((account) => account.id === resolvedDefaultId) ??
+            normalized.accounts[0];
+          setSavedApiKey(resolvedDefault.apiKey);
           setAppMode("dashboard");
-          addLog("API key loaded from config", "success");
+          addLog(
+            normalized.accounts.length === 1
+              ? "Workflowy account loaded from config"
+              : `${normalized.accounts.length} Workflowy accounts loaded from config`,
+            "success",
+          );
         }
         if (config.serverDescription) {
           setServerDescription(config.serverDescription);
@@ -674,16 +727,23 @@ function App() {
         if (config.toolDescriptions) {
           setToolDescriptions(config.toolDescriptions);
         }
+        const configuredRetention =
+          config.backupRetentionDays !== undefined
+            ? config.backupRetentionDays
+            : config.maxBackups;
         if (
-          typeof config.maxBackups === "number" &&
-          Number.isInteger(config.maxBackups) &&
-          config.maxBackups > 0
+          typeof configuredRetention === "number" &&
+          Number.isInteger(configuredRetention) &&
+          configuredRetention > 0
         ) {
-          setSavedMaxBackups(config.maxBackups);
-          setMaxBackupsInput(String(config.maxBackups));
-        } else {
+          setSavedMaxBackups(configuredRetention);
+          setMaxBackupsInput(String(configuredRetention));
+        } else if (configuredRetention === null) {
           setSavedMaxBackups(null);
           setMaxBackupsInput("");
+        } else {
+          setSavedMaxBackups(DEFAULT_BACKUP_RETENTION_DAYS);
+          setMaxBackupsInput(String(DEFAULT_BACKUP_RETENTION_DAYS));
         }
         setBackupSettingsDirty(false);
       }
@@ -710,6 +770,15 @@ function App() {
       console.error("Failed to get data dir", e);
       return "";
     }
+  };
+
+  const getAccountDataDir = async (accountId: string): Promise<string> => {
+    const dataDir = await getDataDir();
+    if (!accountId || accountId === "default") {
+      return dataDir;
+    }
+    const { join } = await import("@tauri-apps/api/path");
+    return join(dataDir, accountId);
   };
 
   const saveConfig = async (config: AppConfig) => {
@@ -746,11 +815,17 @@ function App() {
   ): AppConfig => {
     const config: AppConfig = {};
     const includeApiKey = options.includeApiKey ?? true;
-    const apiKeyToSave =
-      overrides.apiKey !== undefined ? overrides.apiKey : savedApiKey || undefined;
+    const accountsToSave = overrides.accounts !== undefined ? overrides.accounts : accounts;
+    const defaultAccountIdToSave =
+      overrides.defaultAccountId !== undefined
+        ? overrides.defaultAccountId
+        : defaultAccountId || accountsToSave[0]?.id;
 
-    if (includeApiKey && apiKeyToSave) {
-      config.apiKey = apiKeyToSave;
+    if (includeApiKey && accountsToSave.length > 0) {
+      config.accounts = accountsToSave;
+      config.defaultAccountId = defaultAccountIdToSave;
+    } else if (includeApiKey && overrides.apiKey) {
+      config.apiKey = overrides.apiKey;
     }
     if (serverDescription) {
       config.serverDescription = serverDescription;
@@ -764,10 +839,25 @@ function App() {
     const maxBackupsToSave =
       options.maxBackups !== undefined ? options.maxBackups : savedMaxBackups;
     if (typeof maxBackupsToSave === "number" && maxBackupsToSave > 0) {
-      config.maxBackups = maxBackupsToSave;
+      config.backupRetentionDays = maxBackupsToSave;
+    } else if (maxBackupsToSave === null) {
+      config.backupRetentionDays = null;
     }
 
     return config;
+  };
+
+  const getLocalDateKey = (date: Date = new Date()): string => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  };
+
+  const getBackupRetentionCutoffDateKey = (retentionDays: number): string => {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - (retentionDays - 1));
+    return getLocalDateKey(cutoff);
   };
 
   const parseMaxBackupsInput = (): {
@@ -781,19 +871,22 @@ function App() {
 
     const parsed = Number(trimmed);
     if (!Number.isInteger(parsed) || parsed <= 0) {
-      return { value: null, error: "Max backups must be a whole number greater than 0." };
+      return { value: null, error: "Backup retention must be a whole number of days greater than 0." };
     }
 
     return { value: parsed };
   };
 
-  const pruneBackupsInApp = async (maxBackups: number | null) => {
-    if (maxBackups === null) {
+  const pruneBackupsInApp = async (retentionDays: number | null) => {
+    if (retentionDays === null) {
       return 0;
     }
 
     const { remove } = await import("@tauri-apps/plugin-fs");
-    const backupsToDelete = backups.slice(maxBackups);
+    const cutoffDateKey = getBackupRetentionCutoffDateKey(retentionDays);
+    const backupsToDelete = backups.filter(
+      (backup) => backup.backup_date < cutoffDateKey,
+    );
 
     await Promise.all(
       backupsToDelete.map(async (backup) => {
@@ -805,24 +898,115 @@ function App() {
     return backupsToDelete.length;
   };
 
-  const saveApiKey = async () => {
-    if (!apiKey.trim()) {
-      showToast("Please enter an API key", "error");
+  const validateAccountsForSave = (nextAccounts: WorkflowyAccount[]): string | null => {
+    if (nextAccounts.length === 0) {
+      return "Add at least one Workflowy account.";
+    }
+
+    const names = new Set<string>();
+    for (const account of nextAccounts) {
+      if (!account.name.trim()) {
+        return "Each account needs a nickname.";
+      }
+      if (!isValidAccountName(account.name.trim())) {
+        return "Account nicknames can use letters, numbers, spaces, dots, @, _, +, and -.";
+      }
+      if (!account.apiKey.trim()) {
+        return `Add an API key for ${account.name}.`;
+      }
+      const nameKey = account.name.trim().toLowerCase();
+      if (names.has(nameKey)) {
+        return `Account nickname "${account.name}" is already used.`;
+      }
+      names.add(nameKey);
+    }
+
+    return null;
+  };
+
+  const addAccount = () => {
+    const nextNumber = accounts.length + 1;
+    const name = `Account ${nextNumber}`;
+    const usedIds = new Set(accounts.map((account) => account.id));
+    const id =
+      accounts.length === 0
+        ? "default"
+        : uniqueAccountSlug(name, nextNumber, usedIds);
+    const nextAccounts = [...accounts, { id, name, apiKey: "" }];
+    setAccounts(nextAccounts);
+    if (nextAccounts.length === 1) {
+      setDefaultAccountId(id);
+      setSelectedAccountId(id);
+    }
+  };
+
+  const updateAccount = (
+    accountId: string,
+    changes: Partial<Pick<WorkflowyAccount, "name" | "apiKey">>,
+  ) => {
+    setAccounts((prev) =>
+      prev.map((account) =>
+        account.id === accountId ? { ...account, ...changes } : account,
+      ),
+    );
+  };
+
+  const removeAccount = (accountId: string) => {
+    const nextAccounts = accounts.filter((account) => account.id !== accountId);
+    setAccounts(nextAccounts);
+    if (defaultAccountId === accountId) {
+      setDefaultAccountId(nextAccounts[0]?.id ?? "default");
+    }
+    if (selectedAccountId === accountId) {
+      setSelectedAccountId(nextAccounts[0]?.id ?? "default");
+    }
+  };
+
+  const saveAccounts = async () => {
+    const normalizedAccounts = accounts.map((account) => ({
+      ...account,
+      name: account.name.trim(),
+      apiKey: account.apiKey.trim(),
+    }));
+    const validationMessage = validateAccountsForSave(normalizedAccounts);
+    if (validationMessage) {
+      showToast(validationMessage, "error");
       return;
     }
 
     try {
-      addLog("Validating API key...", "info");
-      await invoke("validate_api_key", { apiKey: apiKey.trim() });
+      addLog("Validating Workflowy accounts...", "info");
+      for (const account of normalizedAccounts) {
+        await invoke("validate_api_key", { apiKey: account.apiKey });
+      }
 
-      await saveConfig(buildConfig({ apiKey: apiKey.trim() }));
+      const nextDefaultId =
+        normalizedAccounts.some((account) => account.id === defaultAccountId)
+          ? defaultAccountId
+          : normalizedAccounts[0].id;
+      await saveConfig(
+        buildConfig({
+          accounts: normalizedAccounts,
+          defaultAccountId: nextDefaultId,
+        }),
+      );
 
-      setSavedApiKey(apiKey.trim());
-      addLog("API key validated and saved", "success");
-      showToast("API key saved successfully", "success");
+      setAccounts(normalizedAccounts);
+      setDefaultAccountId(nextDefaultId);
+      setSelectedAccountId((current) =>
+        normalizedAccounts.some((account) => account.id === current)
+          ? current
+          : nextDefaultId,
+      );
+      setSavedApiKey(
+        normalizedAccounts.find((account) => account.id === nextDefaultId)?.apiKey ??
+          normalizedAccounts[0].apiKey,
+      );
+      addLog("Workflowy accounts validated and saved", "success");
+      showToast("Accounts saved successfully", "success");
     } catch (e) {
-      addLog(`Failed to save API key: ${e}`, "error");
-      showToast("Invalid API key", "error");
+      addLog(`Failed to save accounts: ${e}`, "error");
+      showToast("One or more API keys are invalid", "error");
     }
   };
 
@@ -875,7 +1059,9 @@ function App() {
   const loadBookmarks = async () => {
     setBookmarksLoading(true);
     try {
-      const result = await invoke<Bookmark[]>("get_bookmarks");
+      const result = await invoke<Bookmark[]>("get_bookmarks", {
+        accountId: selectedAccount?.id,
+      });
       setBookmarks(result);
     } catch (e) {
       console.error("Failed to load bookmarks:", e);
@@ -887,7 +1073,7 @@ function App() {
 
   const deleteBookmark = async (name: string) => {
     try {
-      await invoke("delete_bookmark", { name });
+      await invoke("delete_bookmark", { accountId: selectedAccount?.id, name });
       setBookmarks((prev) => prev.filter((b) => b.name !== name));
       showToast(`Bookmark "${name}" deleted`, "success");
       addLog(`Deleted bookmark: ${name}`, "info");
@@ -910,7 +1096,11 @@ function App() {
   const saveBookmarkContext = async (name: string) => {
     try {
       const context = editingContext.trim() || null;
-      await invoke("update_bookmark_context", { name, context });
+      await invoke("update_bookmark_context", {
+        accountId: selectedAccount?.id,
+        name,
+        context,
+      });
       setBookmarks((prev) =>
         prev.map((b) => (b.name === name ? { ...b, context } : b)),
       );
@@ -943,12 +1133,16 @@ function App() {
   const clearApiKey = async () => {
     try {
       await saveConfig(buildConfig({}, { includeApiKey: false }));
-      setApiKey("");
       setSavedApiKey("");
+      setAccounts([]);
+      setDefaultAccountId("default");
+      setSelectedAccountId("default");
+      setOnboardingAccountMode("single");
+      setOnboardingAccounts([{ id: "default", name: "Personal", apiKey: "" }]);
       setAppMode("onboarding");
       setOnboardingStep(1);
-      addLog("API key cleared", "info");
-      showToast("API key cleared", "success");
+      addLog("Workflowy accounts cleared", "info");
+      showToast("Workflowy accounts cleared", "success");
     } catch (e) {
       addLog(`Failed to clear API key: ${e}`, "error");
       showToast("Failed to clear API key", "error");
@@ -994,8 +1188,18 @@ function App() {
     if (!backupDirectory) return;
 
     try {
+      const { exists, mkdir } = await import("@tauri-apps/plugin-fs");
       const { openPath } = await import("@tauri-apps/plugin-opener");
-      await openPath(backupDirectory);
+      if (!(await exists(backupDirectory))) {
+        await mkdir(backupDirectory, { recursive: true });
+      }
+
+      try {
+        await openPath(backupDirectory);
+      } catch {
+        const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+        await revealItemInDir(backupDirectory);
+      }
     } catch (e) {
       console.error("Failed to open backups folder:", e);
       showToast("Failed to open backups folder", "error");
@@ -1020,7 +1224,7 @@ function App() {
       addLog(
         parsed.value === null
           ? "Backup retention cleared; all backups will be kept."
-          : `Backup retention set to ${parsed.value} snapshot${parsed.value === 1 ? "" : "s"}.`,
+          : `Backup retention set to the last ${parsed.value} day${parsed.value === 1 ? "" : "s"}.`,
         "success",
       );
       showToast(
@@ -1050,21 +1254,109 @@ function App() {
     showToast("Configuration copied to clipboard", "success");
   };
 
-  const onboardingSaveApiKey = async () => {
-    if (!apiKey.trim()) {
-      setValidationError("Please enter an API key");
+  const setOnboardingMode = (mode: "single" | "multiple") => {
+    setOnboardingAccountMode(mode);
+    setValidationError("");
+    setOnboardingAccounts((prev) => {
+      const first = prev[0] ?? { id: "default", name: "Personal", apiKey: "" };
+      if (mode === "single") {
+        return [{ ...first, id: "default" }];
+      }
+      if (prev.length >= 2) {
+        return prev;
+      }
+      return [
+        { ...first, id: "default" },
+        { id: "account_2", name: "Work", apiKey: "" },
+      ];
+    });
+  };
+
+  const updateOnboardingAccount = (
+    accountId: string,
+    changes: Partial<Pick<WorkflowyAccount, "name" | "apiKey">>,
+  ) => {
+    setOnboardingAccounts((prev) =>
+      prev.map((account) =>
+        account.id === accountId ? { ...account, ...changes } : account,
+      ),
+    );
+    setValidationError("");
+  };
+
+  const addOnboardingAccount = () => {
+    const nextNumber = onboardingAccounts.length + 1;
+    setOnboardingAccounts((prev) => [
+      ...prev,
+      {
+        id: `account_${nextNumber}`,
+        name: `Account ${nextNumber}`,
+        apiKey: "",
+      },
+    ]);
+    setValidationError("");
+  };
+
+  const removeOnboardingAccount = (accountId: string) => {
+    setOnboardingAccounts((prev) => prev.filter((account) => account.id !== accountId));
+    setValidationError("");
+  };
+
+  const buildStableOnboardingAccounts = (): WorkflowyAccount[] => {
+    const usedIds = new Set<string>(["default"]);
+    return onboardingAccounts.map((account, index) => {
+      const name =
+        onboardingAccountMode === "single" && index === 0
+          ? "default"
+          : account.name.trim();
+      return {
+        id: index === 0 ? "default" : uniqueAccountSlug(name, index + 1, usedIds),
+        name,
+        apiKey: account.apiKey.trim(),
+      };
+    });
+  };
+
+  const onboardingSaveAccounts = async () => {
+    const nextAccounts =
+      onboardingAccountMode === "single"
+        ? buildStableOnboardingAccounts().slice(0, 1)
+        : buildStableOnboardingAccounts();
+    const validationMessage = validateAccountsForSave(nextAccounts);
+    if (validationMessage) {
+      setValidationError(validationMessage);
       return;
     }
+    if (onboardingAccountMode === "multiple" && nextAccounts.length < 2) {
+      setValidationError("Add at least two accounts or choose single account.");
+      return;
+    }
+
     setIsValidating(true);
     setValidationError("");
     try {
-      await invoke("validate_api_key", { apiKey: apiKey.trim() });
-      await saveConfig(buildConfig({ apiKey: apiKey.trim() }));
-      setSavedApiKey(apiKey.trim());
-      setOnboardingStep(2);
-      addLog("API key validated and saved", "success");
+      for (const account of nextAccounts) {
+        await invoke("validate_api_key", { apiKey: account.apiKey });
+      }
+      await saveConfig(
+        buildConfig({
+          accounts: nextAccounts,
+          defaultAccountId: "default",
+        }),
+      );
+      setAccounts(nextAccounts);
+      setDefaultAccountId("default");
+      setSelectedAccountId("default");
+      setSavedApiKey(nextAccounts[0].apiKey);
+      setOnboardingStep(3);
+      addLog(
+        nextAccounts.length === 1
+          ? "Workflowy account validated and saved"
+          : `${nextAccounts.length} Workflowy accounts validated and saved`,
+        "success",
+      );
     } catch {
-      setValidationError("Invalid API key. Please check your key and try again.");
+      setValidationError("One or more API keys are invalid. Please check and try again.");
     } finally {
       setIsValidating(false);
     }
@@ -1175,12 +1467,34 @@ function App() {
     }
   };
 
+  const renderAccountSelector = () => {
+    if (accounts.length <= 1) return null;
+    return (
+      <div className="input-group account-selector">
+        <label>Account</label>
+        <div className="account-selector-control">
+          <select
+            value={selectedAccount?.id ?? defaultAccountId}
+            onChange={(e) => setSelectedAccountId(e.target.value)}
+          >
+            {accounts.map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.name}
+                {account.id === defaultAccountId ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+    );
+  };
+
   if (!configLoaded) return null;
 
   return (
     <>
       {/* ===== ONBOARDING MODE ===== */}
-      {(appMode === "onboarding" || appMode === "dashboard") && (
+      {showParticleCanvas && (
         <canvas ref={particleCanvasRef} className="dashboard-particle-canvas" />
       )}
 
@@ -1191,21 +1505,56 @@ function App() {
               {onboardingStep > 1 && (
                 <button
                   className="onboarding-back"
-                  onClick={() => setOnboardingStep((onboardingStep - 1) as 1 | 2 | 3)}
+                  onClick={() => setOnboardingStep((onboardingStep - 1) as 1 | 2 | 3 | 4)}
                 >
                   &#8592; Back
                 </button>
               )}
               <div className="onboarding-progress">
-                Step {onboardingStep} of 3
+                Step {onboardingStep} of 4
               </div>
             </div>
 
             {onboardingStep === 1 && (
               <div className="onboarding-step">
-                <h2>Add your Workflowy API key</h2>
+                <h2>How many Workflowy accounts?</h2>
                 <p className="onboarding-subtitle">
-                  Don't have one?{" "}
+                  If you use multiple Workflowy accounts, you can connect to all of them and give them nicknames.
+                </p>
+
+                <div className="onboarding-client-cards">
+                  <button
+                    className={`onboarding-client-card ${onboardingAccountMode === "single" ? "selected" : ""}`}
+                    onClick={() => setOnboardingMode("single")}
+                  >
+                    Single account
+                  </button>
+                  <button
+                    className={`onboarding-client-card ${onboardingAccountMode === "multiple" ? "selected" : ""}`}
+                    onClick={() => setOnboardingMode("multiple")}
+                  >
+                    Multiple accounts
+                  </button>
+                </div>
+
+                <button
+                  className="button button-primary"
+                  onClick={() => setOnboardingStep(2)}
+                >
+                  Continue
+                </button>
+              </div>
+            )}
+
+            {onboardingStep === 2 && (
+              <div className="onboarding-step">
+                <h2>
+                  {onboardingAccountMode === "single"
+                    ? "Add your Workflowy account"
+                    : "Add your Workflowy accounts"}
+                </h2>
+                <p className="onboarding-subtitle">
+                  Give each account a nickname the AI can use later.{" "}
                   <a
                     href="https://workflowy.com/api-key"
                     target="_blank"
@@ -1215,35 +1564,90 @@ function App() {
                   </a>
                 </p>
 
-                <div className="onboarding-input-group">
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => {
-                      setApiKey(e.target.value);
-                      setValidationError("");
-                    }}
-                    placeholder="Paste your API key here"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void onboardingSaveApiKey();
-                    }}
-                  />
-                  {validationError && (
-                    <div className="onboarding-error">{validationError}</div>
-                  )}
-                </div>
+                {onboardingAccountMode === "single" ? (
+                  <div className="onboarding-input-group">
+                    <input
+                      type="password"
+                      value={onboardingAccounts[0]?.apiKey ?? ""}
+                      onChange={(e) =>
+                        updateOnboardingAccount("default", { apiKey: e.target.value })
+                      }
+                      placeholder="Paste your API key here"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void onboardingSaveAccounts();
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <div className="onboarding-accounts-list">
+                    {onboardingAccounts.map((account, index) => (
+                      <div key={account.id} className="onboarding-account-card">
+                        <div className="account-card-header">
+                          <strong>Account {index + 1}</strong>
+                          {index > 0 && (
+                            <button
+                              className="button button-danger button-small"
+                              onClick={() => removeOnboardingAccount(account.id)}
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
+                        <div className="onboarding-input-group">
+                          <input
+                            type="text"
+                            value={account.name}
+                            onChange={(e) =>
+                              updateOnboardingAccount(account.id, { name: e.target.value })
+                            }
+                            placeholder="Nickname, like Personal or Work"
+                          />
+                          <input
+                            type="password"
+                            value={account.apiKey}
+                            onChange={(e) =>
+                              updateOnboardingAccount(account.id, { apiKey: e.target.value })
+                            }
+                            placeholder="Paste this account's API key"
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") void onboardingSaveAccounts();
+                            }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {onboardingAccountMode === "multiple" && (
+                  <button
+                    className="button button-secondary onboarding-add-account"
+                    onClick={addOnboardingAccount}
+                  >
+                    Add Another Account
+                  </button>
+                )}
+
+                {validationError && (
+                  <div className="onboarding-error">{validationError}</div>
+                )}
 
                 <button
                   className="button button-primary"
-                  onClick={onboardingSaveApiKey}
-                  disabled={isValidating || !apiKey.trim()}
+                  onClick={onboardingSaveAccounts}
+                  disabled={
+                    isValidating ||
+                    (onboardingAccountMode === "single"
+                      ? !onboardingAccounts[0]?.apiKey.trim()
+                      : onboardingAccounts.some((account) => !account.apiKey.trim()))
+                  }
                 >
                   {isValidating ? "Validating..." : "Save & Continue"}
                 </button>
               </div>
             )}
 
-            {onboardingStep === 2 && (
+            {onboardingStep === 3 && (
               <div className="onboarding-step">
                 <h2>Choose which app you want to use this with</h2>
                 <p className="onboarding-subtitle">
@@ -1269,14 +1673,14 @@ function App() {
 
                 <button
                   className="button button-primary"
-                  onClick={() => setOnboardingStep(3)}
+                  onClick={() => setOnboardingStep(4)}
                 >
                   Next
                 </button>
               </div>
             )}
 
-            {onboardingStep === 3 && (
+            {onboardingStep === 4 && (
               <div className="onboarding-step">
                 <h2>Add the configuration</h2>
 
@@ -1348,7 +1752,7 @@ function App() {
 
             <div className="dashboard-status">
               <div className="dashboard-status-dot status-dot-ok" />
-              <span className="dashboard-status-text">Connected</span>
+              <span className="dashboard-status-text">{dashboardConnectionText}</span>
             </div>
 
             <div className="dashboard-info-grid">
@@ -1357,9 +1761,9 @@ function App() {
                 <span className="dashboard-info-value">v{appVersion || "..."}</span>
               </div>
               <div className="dashboard-info-item">
-                <span className="dashboard-info-label">API Key</span>
-                <span className="dashboard-info-value dashboard-info-mono">
-                  {maskApiKey(savedApiKey)}
+                <span className="dashboard-info-label">Default Account</span>
+                <span className="dashboard-info-value">
+                  {defaultAccount?.name ?? "Not configured"}
                 </span>
               </div>
               <div className="dashboard-info-item dashboard-info-full">
@@ -1413,7 +1817,7 @@ function App() {
             className={`nav-item ${activeSection === "api-key" ? "active" : ""}`}
             onClick={() => setActiveSection("api-key")}
           >
-            <span>API Key</span>
+            <span>Accounts</span>
           </div>
           <div
             className={`nav-item ${activeSection === "setup" ? "active" : ""}`}
@@ -1429,10 +1833,7 @@ function App() {
           </div>
           <div
             className={`nav-item ${activeSection === "bookmarks" ? "active" : ""}`}
-            onClick={() => {
-              setActiveSection("bookmarks");
-              loadBookmarks();
-            }}
+            onClick={() => setActiveSection("bookmarks")}
           >
             <span>Bookmarks</span>
           </div>
@@ -1521,13 +1922,13 @@ function App() {
             </>
           )}
 
-          {/* API Key Section */}
+          {/* Accounts Section */}
           {activeSection === "api-key" && (
             <>
               <div className="header">
-                <h1>API Key</h1>
+                <h1>Accounts</h1>
                 <p>
-                  Configure your Workflowy API key.{" "}
+                  Add one or more Workflowy accounts.{" "}
                   <a
                     href="https://workflowy.com/api-key"
                     target="_blank"
@@ -1539,54 +1940,79 @@ function App() {
                 </p>
               </div>
 
-              {savedApiKey ? (
-                <>
-                  <div className="api-key-status">
-                    <div className="api-key-info">
-                      <span className="api-key-label">Current API Key:</span>
-                      <code className="api-key-masked">
-                        {maskApiKey(savedApiKey)}
-                      </code>
+              <div className="accounts-list">
+                {accounts.map((account) => (
+                  <div key={account.id} className="account-card">
+                    <div className="account-card-header">
+                      <strong>{account.name || "New account"}</strong>
+                      <span className="api-key-masked">{maskApiKey(account.apiKey)}</span>
                     </div>
-                    <span className="api-key-validated">Validated</span>
+                    <div className="input-group account-field-row">
+                      <label>Nickname</label>
+                      <input
+                        type="text"
+                        value={account.name}
+                        onChange={(e) =>
+                          updateAccount(account.id, { name: e.target.value })
+                        }
+                        placeholder="Personal"
+                      />
+                    </div>
+                    <div className="input-group account-field-row">
+                      <label>API Key</label>
+                      <input
+                        type="password"
+                        value={account.apiKey}
+                        onChange={(e) =>
+                          updateAccount(account.id, { apiKey: e.target.value })
+                        }
+                        placeholder="wf_xxxxxxxxxxxx"
+                      />
+                    </div>
+                    <div className="account-actions">
+                      <label className="account-default-choice">
+                        <input
+                          type="radio"
+                          name="default-account"
+                          checked={defaultAccountId === account.id}
+                          onChange={() => setDefaultAccountId(account.id)}
+                        />
+                        Default
+                      </label>
+                      <button
+                        className="button button-danger button-small"
+                        onClick={() => removeAccount(account.id)}
+                        disabled={accounts.length === 1}
+                      >
+                        Remove
+                      </button>
+                    </div>
                   </div>
-                  <div className="api-key-actions">
-                    <button
-                      className="button button-secondary"
-                      onClick={() => {
-                        setSavedApiKey("");
-                        setApiKey("");
-                      }}
-                    >
-                      Change Key
-                    </button>
+                ))}
+
+                {accounts.length === 0 && (
+                  <div className="bookmarks-empty">
+                    <p>No Workflowy accounts configured.</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="api-key-actions">
+                <button className="button button-secondary" onClick={addAccount}>
+                  Add Account
+                </button>
+                <button className="button button-primary" onClick={saveAccounts}>
+                  Validate & Save Accounts
+                </button>
+                {accounts.length > 0 && (
                     <button
                       className="button button-danger"
                       onClick={clearApiKey}
                     >
-                      Clear Key
+                      Clear Accounts
                     </button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="input-group">
-                    <label>API Key</label>
-                    <input
-                      type="password"
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder="wf_xxxxxxxxxxxx"
-                    />
-                  </div>
-                  <button
-                    className="button button-primary"
-                    onClick={saveApiKey}
-                  >
-                    Validate & Save
-                  </button>
-                </>
-              )}
+                )}
+              </div>
             </>
           )}
 
@@ -1738,16 +2164,7 @@ function App() {
                 <h1>Bookmarks</h1>
                 <p>View and manage saved Workflowy node bookmarks</p>
               </div>
-
-              <div className="bookmarks-actions">
-                <button
-                  className="button button-secondary"
-                  onClick={loadBookmarks}
-                  disabled={bookmarksLoading}
-                >
-                  {bookmarksLoading ? "Loading..." : "Refresh"}
-                </button>
-              </div>
+              {renderAccountSelector()}
 
               {bookmarksLoading ? (
                 <div className="bookmarks-loading">Loading bookmarks...</div>
@@ -1768,9 +2185,6 @@ function App() {
                         <span className="bookmark-date">
                           {formatDate(bookmark.created_at)}
                         </span>
-                      </div>
-                      <div className="bookmark-node-id">
-                        <code title={bookmark.node_id}>{bookmark.node_id}</code>
                       </div>
                       <div className="bookmark-context-section">
                         <label className="bookmark-context-label">
@@ -1810,23 +2224,30 @@ function App() {
                                 No context set. Click Edit to add notes.
                               </p>
                             )}
+                          </div>
+                        )}
+                      </div>
+                      <div className="bookmark-card-actions">
+                        <div className="bookmark-node-id">
+                          <code title={bookmark.node_id}>{bookmark.node_id}</code>
+                        </div>
+                        <div className="bookmark-card-buttons">
+                          {editingBookmark !== bookmark.name && (
                             <button
                               className="button button-secondary button-small"
                               onClick={() => startEditingContext(bookmark)}
                             >
                               Edit
                             </button>
-                          </div>
-                        )}
-                      </div>
-                      <div className="bookmark-card-actions">
-                        <button
-                          className="button button-danger button-small"
-                          onClick={() => deleteBookmark(bookmark.name)}
-                          title="Delete bookmark"
-                        >
-                          Delete
-                        </button>
+                          )}
+                          <button
+                            className="button button-danger button-small"
+                            onClick={() => deleteBookmark(bookmark.name)}
+                            title="Delete bookmark"
+                          >
+                            Delete
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -1845,8 +2266,9 @@ function App() {
                   when the MCP server starts.
                 </p>
               </div>
+              {renderAccountSelector()}
 
-              {!savedApiKey ? (
+              {!selectedApiKey ? (
                 <div className="info-box">
                   <p>
                     <strong>API Key Required:</strong> Please configure your API
@@ -1855,10 +2277,10 @@ function App() {
                 </div>
               ) : null}
 
-              {savedApiKey ? (
+              {selectedApiKey ? (
                 <>
-                  <div className="cache-status">
-                    <h3>Cache Status</h3>
+                  <div className="settings-section-block">
+                    <h3 className="settings-section-title">Cache Status</h3>
                     {cacheStatus ? (
                       <div className="status-grid">
                         <div className="status-item">
@@ -1965,17 +2387,18 @@ function App() {
                   your machine.
                 </p>
               </div>
+              {renderAccountSelector()}
 
               <div className="cache-status">
                 <h3>Retention</h3>
                 <p className="section-hint">
-                  Set how many backups to keep. Leave this blank to keep all
-                  backups indefinitely.
+                  By default, backups from the last three days are kept. Leave
+                  this blank to keep all backups indefinitely.
                 </p>
 
                 <div className="backup-retention-row">
                   <div className="input-group backup-retention-input">
-                    <label>Max Backups to Keep</label>
+                    <label>Days to Keep</label>
                     <input
                       type="number"
                       min="1"
@@ -2013,13 +2436,12 @@ function App() {
                   <strong>
                     {savedMaxBackups === null
                       ? "Keep all backups"
-                      : `Keep the latest ${savedMaxBackups} backup${savedMaxBackups === 1 ? "" : "s"}`}
+                      : `Keep backups from the last ${savedMaxBackups} day${savedMaxBackups === 1 ? "" : "s"}`}
                   </strong>
                 </p>
               </div>
 
-              <div className="cache-status">
-                <h3>Backup Overview</h3>
+              <div className="info-box">
                 <p className="section-hint">
                   The server stores one complete Workflowy export per day in the
                   local app data folder. Use <code>list_backups</code>,{" "}
@@ -2027,7 +2449,9 @@ function App() {
                   <code>export_backup</code> from your MCP client for backup
                   management.
                 </p>
+              </div>
 
+              <div className="settings-section-block">
                 <div className="status-grid">
                   <div className="status-item">
                     <span className="status-label">Stored Backups</span>
@@ -2048,7 +2472,7 @@ function App() {
                   <code>{backupDirectory || "Loading..."}</code>
                 </div>
 
-                <div className="cache-actions">
+                <div className="cache-actions backup-page-actions">
                   <button
                     className="button button-secondary"
                     onClick={openBackupsFolder}
@@ -2086,9 +2510,12 @@ function App() {
                               {formatDate(backup.created_at)}
                             </div>
                           </div>
-                          <span className={`backup-badge ${backup.source}`}>
-                            {backup.source}
-                          </span>
+                          <button
+                            className="button button-secondary button-small"
+                            onClick={() => void revealBackupInFolder(backup.path)}
+                          >
+                            Reveal File
+                          </button>
                         </div>
                         <div className="backup-meta">
                           <span>{backup.node_count.toLocaleString()} nodes</span>
@@ -2097,21 +2524,13 @@ function App() {
                         <div className="backup-path">
                           <code title={backup.path}>{backup.path}</code>
                         </div>
-                        <div className="backup-actions">
-                          <button
-                            className="button button-secondary button-small"
-                            onClick={() => void revealBackupInFolder(backup.path)}
-                          >
-                            Reveal File
-                          </button>
-                        </div>
                       </div>
                     ))}
                   </div>
                 )}
 
                 {backups.length > 5 && (
-                  <p className="section-hint">
+                  <p className="section-hint backup-list-footnote">
                     Showing the 5 most recent backups. Use{" "}
                     <code>list_backups</code> via MCP for the full list.
                   </p>

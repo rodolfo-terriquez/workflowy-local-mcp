@@ -6170,7 +6170,7 @@ dependencies = [
 
 [[package]]
 name = "workflowy-local-mcp"
-version = "1.4.1"
+version = "1.5.2"
 dependencies = [
  "reqwest 0.12.28",
  "rusqlite",

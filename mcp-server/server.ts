@@ -13,13 +13,28 @@ import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
 import { defaultServerInstructions, toolDescriptions } from "../shared/constants.js";
+import {
+  normalizeAccountConfigs,
+  parseLegacyAccountConfig,
+  type StoredAccountConfig,
+} from "../shared/accounts.js";
 
 // Config interface
 interface Config {
   apiKey?: string;
+  accounts?: Array<Partial<StoredAccountConfig>>;
+  defaultAccountId?: string;
   serverDescription?: string;
   toolDescriptions?: Record<string, string>;
-  maxBackups?: number;
+  backupRetentionDays?: number | null;
+  maxBackups?: number | null;
+}
+
+const DEFAULT_BACKUP_RETENTION_DAYS = 3;
+
+interface Account extends StoredAccountConfig {
+  dataDir: string;
+  db: Database | null;
 }
 
 interface WorkflowyExportNode {
@@ -79,8 +94,8 @@ function ensureDirExists(dirPath: string): void {
   }
 }
 
-function getBackupsDir(): string {
-  const backupsDir = path.join(getDataDir(), "backups");
+function getBackupsDir(account: Account): string {
+  const backupsDir = path.join(account.dataDir, "backups");
   ensureDirExists(backupsDir);
   return backupsDir;
 }
@@ -100,29 +115,92 @@ function loadConfig(): Config {
   return {};
 }
 
-function getConfiguredMaxBackups(): number | null {
+function getConfiguredBackupRetentionDays(): number | null {
   const config = loadConfig();
-  if (
-    typeof config.maxBackups === "number" &&
-    Number.isInteger(config.maxBackups) &&
-    config.maxBackups > 0
-  ) {
-    return config.maxBackups;
+  const configuredRetention =
+    config.backupRetentionDays !== undefined
+      ? config.backupRetentionDays
+      : config.maxBackups;
+
+  if (configuredRetention === null) {
+    return null;
   }
-  return null;
+
+  if (
+    typeof configuredRetention === "number" &&
+    Number.isInteger(configuredRetention) &&
+    configuredRetention > 0
+  ) {
+    return configuredRetention;
+  }
+  return DEFAULT_BACKUP_RETENTION_DAYS;
 }
 
-// Database singleton
-let dbInstance: Database | null = null;
 let SQL: initSqlJs.SqlJsStatic | null = null;
+let accounts: Account[] = [];
+let defaultAccountId: string | null = null;
 
-// Initialize SQLite database
-async function getDb(): Promise<Database> {
-  if (dbInstance) {
-    return dbInstance;
+function loadAccounts(): Account[] {
+  const baseDir = getDataDir();
+  const envValue = process.env.WORKFLOWY_API_KEY || "";
+  const parsed = envValue.trim()
+    ? {
+        accounts: parseLegacyAccountConfig(envValue),
+        defaultAccountId: "default",
+      }
+    : normalizeAccountConfigs(loadConfig());
+
+  defaultAccountId = parsed.defaultAccountId;
+  const loadedAccounts = parsed.accounts.map((account) => ({
+    ...account,
+    dataDir: account.id === "default" ? baseDir : path.join(baseDir, account.id),
+    db: null,
+  }));
+
+  if (loadedAccounts.length > 0) {
+    const summary = loadedAccounts
+      .map((account) => `"${account.name}"${account.id === defaultAccountId ? " (default)" : ""}`)
+      .join(", ");
+    writeMcpLog(`Configured Workflowy accounts: ${summary}`, "info");
+  } else {
+    writeMcpLog("No Workflowy accounts configured", "warning");
   }
 
-  const dataDir = getDataDir();
+  return loadedAccounts;
+}
+
+function getDefaultAccount(): Account {
+  const account =
+    accounts.find((candidate) => candidate.id === defaultAccountId) ?? accounts[0];
+  if (!account) {
+    throw new Error("No Workflowy accounts configured. Please add an account in the app settings.");
+  }
+  return account;
+}
+
+function resolveAccount(accountName?: string): Account {
+  if (!accountName) {
+    return getDefaultAccount();
+  }
+
+  const lower = accountName.toLowerCase();
+  const found = accounts.find(
+    (account) => account.name.toLowerCase() === lower || account.id.toLowerCase() === lower,
+  );
+  if (!found) {
+    const available = accounts.map((account) => `"${account.name}"`).join(", ");
+    throw new Error(`Account "${accountName}" not found. Available accounts: ${available}`);
+  }
+  return found;
+}
+
+// Initialize SQLite database
+async function getDbForAccount(account: Account): Promise<Database> {
+  if (account.db) {
+    return account.db;
+  }
+
+  const dataDir = account.dataDir;
   ensureDirExists(dataDir);
 
   const dbPath = path.join(dataDir, "bookmarks.db");
@@ -135,13 +213,15 @@ async function getDb(): Promise<Database> {
   // Load existing database or create new one
   if (fs.existsSync(dbPath)) {
     const fileBuffer = fs.readFileSync(dbPath);
-    dbInstance = new SQL.Database(fileBuffer);
+    account.db = new SQL.Database(fileBuffer);
   } else {
-    dbInstance = new SQL.Database();
+    account.db = new SQL.Database();
   }
 
+  const db = account.db;
+
   // Create table if it doesn't exist (with context field for LLM notes)
-  dbInstance.run(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS bookmarks (
       name TEXT PRIMARY KEY,
       node_id TEXT NOT NULL,
@@ -152,16 +232,16 @@ async function getDb(): Promise<Database> {
 
   // Migration: Add context column to existing bookmarks table if it doesn't exist
   // This handles databases created before the context column was added
-  const bookmarksTableInfo = dbInstance.exec("PRAGMA table_info(bookmarks)");
+  const bookmarksTableInfo = db.exec("PRAGMA table_info(bookmarks)");
   if (bookmarksTableInfo.length > 0) {
     const columns = bookmarksTableInfo[0].values.map((row) => row[1]); // column name is at index 1
     if (!columns.includes("context")) {
-      dbInstance.run("ALTER TABLE bookmarks ADD COLUMN context TEXT");
+      db.run("ALTER TABLE bookmarks ADD COLUMN context TEXT");
     }
   }
 
   // Create nodes cache table (with children_count and priority for ordering)
-  dbInstance.run(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS nodes (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL DEFAULT '',
@@ -177,47 +257,47 @@ async function getDb(): Promise<Database> {
   `);
 
   // Migration: Add missing columns to existing nodes table
-  const nodesTableInfo = dbInstance.exec("PRAGMA table_info(nodes)");
+  const nodesTableInfo = db.exec("PRAGMA table_info(nodes)");
   if (nodesTableInfo.length > 0) {
     const columns = nodesTableInfo[0].values.map((row) => row[1]); // column name is at index 1
     if (!columns.includes("children_count")) {
-      dbInstance.run("ALTER TABLE nodes ADD COLUMN children_count INTEGER DEFAULT 0");
+      db.run("ALTER TABLE nodes ADD COLUMN children_count INTEGER DEFAULT 0");
     }
     if (!columns.includes("priority")) {
-      dbInstance.run("ALTER TABLE nodes ADD COLUMN priority INTEGER DEFAULT 0");
+      db.run("ALTER TABLE nodes ADD COLUMN priority INTEGER DEFAULT 0");
     }
     if (!columns.includes("created_at")) {
-      dbInstance.run("ALTER TABLE nodes ADD COLUMN created_at TEXT");
+      db.run("ALTER TABLE nodes ADD COLUMN created_at TEXT");
     }
     if (!columns.includes("updated_at")) {
-      dbInstance.run("ALTER TABLE nodes ADD COLUMN updated_at TEXT");
+      db.run("ALTER TABLE nodes ADD COLUMN updated_at TEXT");
     }
     if (!columns.includes("completed_at")) {
-      dbInstance.run("ALTER TABLE nodes ADD COLUMN completed_at TEXT");
+      db.run("ALTER TABLE nodes ADD COLUMN completed_at TEXT");
     }
   }
 
   // Create indexes for efficient querying
   // Note: sql.js doesn't support FTS5, so we use LIKE with indexes
-  dbInstance.run(
+  db.run(
     `CREATE INDEX IF NOT EXISTS idx_nodes_parent_id ON nodes(parent_id)`,
   );
-  dbInstance.run(
+  db.run(
     `CREATE INDEX IF NOT EXISTS idx_nodes_completed ON nodes(completed)`,
   );
-  dbInstance.run(
+  db.run(
     `CREATE INDEX IF NOT EXISTS idx_nodes_priority ON nodes(parent_id, priority)`,
   );
   // Index for text search (helps with LIKE queries on large datasets)
-  dbInstance.run(
+  db.run(
     `CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name)`,
   );
-  dbInstance.run(
+  db.run(
     `CREATE INDEX IF NOT EXISTS idx_nodes_note ON nodes(note)`,
   );
 
   // Create sync metadata table
-  dbInstance.run(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS sync_meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -225,18 +305,17 @@ async function getDb(): Promise<Database> {
   `);
 
   // Save after creating table
-  saveDb();
+  saveDbForAccount(account);
 
-  return dbInstance;
+  return db;
 }
 
 // Save database to disk
-function saveDb(): void {
-  if (!dbInstance) return;
+function saveDbForAccount(account: Account): void {
+  if (!account.db) return;
 
-  const dataDir = getDataDir();
-  const dbPath = path.join(dataDir, "bookmarks.db");
-  const data = dbInstance.export();
+  const dbPath = path.join(account.dataDir, "bookmarks.db");
+  const data = account.db.export();
   const buffer = Buffer.from(data);
   fs.writeFileSync(dbPath, buffer);
 }
@@ -321,25 +400,31 @@ function getLocalDateKey(date: Date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
+function getBackupRetentionCutoffDateKey(retentionDays: number): string {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - (retentionDays - 1));
+  return getLocalDateKey(cutoff);
+}
+
 function sanitizeTimestampForFilename(timestamp: string): string {
   return timestamp.replace(/:/g, "-");
 }
 
-function getBackupPaths(backupId: string): {
+function getBackupPaths(account: Account, backupId: string): {
   dataPath: string;
   metadataPath: string;
 } {
-  const backupsDir = getBackupsDir();
+  const backupsDir = getBackupsDir(account);
   return {
     dataPath: path.join(backupsDir, `${backupId}.json`),
     metadataPath: path.join(backupsDir, `${backupId}.meta.json`),
   };
 }
 
-function listBackupSnapshots(): Array<
+function listBackupSnapshots(account: Account): Array<
   BackupSnapshotMetadata & { path: string; size_bytes: number }
 > {
-  const backupsDir = getBackupsDir();
+  const backupsDir = getBackupsDir(account);
   const entries = fs
     .readdirSync(backupsDir)
     .filter((entry) => entry.endsWith(".meta.json"));
@@ -373,13 +458,15 @@ function listBackupSnapshots(): Array<
 }
 
 function findBackupById(
+  account: Account,
   backupId: string,
 ): (BackupSnapshotMetadata & { path: string; size_bytes: number }) | null {
-  return listBackupSnapshots().find((backup) => backup.id === backupId) ?? null;
+  return listBackupSnapshots(account).find((backup) => backup.id === backupId) ?? null;
 }
 
 function syncLatestBackupMetadata(
   db: Database,
+  account: Account,
   backups: Array<BackupSnapshotMetadata & { path: string; size_bytes: number }>,
 ): void {
   const latestBackup = backups[0];
@@ -403,11 +490,11 @@ function syncLatestBackupMetadata(
     );
   }
 
-  saveDb();
+  saveDbForAccount(account);
 }
 
-function deleteBackupSnapshotFiles(backupId: string): void {
-  const { dataPath, metadataPath } = getBackupPaths(backupId);
+function deleteBackupSnapshotFiles(account: Account, backupId: string): void {
+  const { dataPath, metadataPath } = getBackupPaths(account, backupId);
   if (fs.existsSync(dataPath)) {
     fs.unlinkSync(dataPath);
   }
@@ -416,46 +503,51 @@ function deleteBackupSnapshotFiles(backupId: string): void {
   }
 }
 
-function pruneOldBackups(db: Database): {
-  maxBackups: number | null;
+function pruneOldBackups(db: Database, account: Account): {
+  retentionDays: number | null;
   deletedIds: string[];
   remainingCount: number;
 } {
-  const maxBackups = getConfiguredMaxBackups();
-  const backups = listBackupSnapshots();
+  const retentionDays = getConfiguredBackupRetentionDays();
+  const backups = listBackupSnapshots(account);
 
-  if (maxBackups === null) {
+  if (retentionDays === null) {
     return {
-      maxBackups,
+      retentionDays,
       deletedIds: [],
       remainingCount: backups.length,
     };
   }
 
-  const backupsToDelete = backups.slice(maxBackups);
+  const cutoffDateKey = getBackupRetentionCutoffDateKey(retentionDays);
+  const backupsToDelete = backups.filter(
+    (backup) => backup.backup_date < cutoffDateKey,
+  );
   for (const backup of backupsToDelete) {
-    deleteBackupSnapshotFiles(backup.id);
+    deleteBackupSnapshotFiles(account, backup.id);
   }
 
-  const remainingBackups = backups.slice(0, maxBackups);
-  syncLatestBackupMetadata(db, remainingBackups);
+  const remainingBackups = backups.filter(
+    (backup) => backup.backup_date >= cutoffDateKey,
+  );
+  syncLatestBackupMetadata(db, account, remainingBackups);
 
   return {
-    maxBackups,
+    retentionDays,
     deletedIds: backupsToDelete.map((backup) => backup.id),
     remainingCount: remainingBackups.length,
   };
 }
 
-function hasBackupForDate(dateKey: string): boolean {
-  return listBackupSnapshots().some((backup) => backup.backup_date === dateKey);
+function hasBackupForDate(account: Account, dateKey: string): boolean {
+  return listBackupSnapshots(account).some((backup) => backup.backup_date === dateKey);
 }
 
-function loadBackupSnapshot(backupId: string): {
+function loadBackupSnapshot(account: Account, backupId: string): {
   metadata: BackupSnapshotMetadata & { path: string; size_bytes: number };
   snapshot: BackupSnapshotRecord;
 } {
-  const metadata = findBackupById(backupId);
+  const metadata = findBackupById(account, backupId);
   if (!metadata) {
     throw new Error(`Backup "${backupId}" not found.`);
   }
@@ -472,6 +564,7 @@ function loadBackupSnapshot(backupId: string): {
 }
 
 function writeBackupSnapshot(
+  account: Account,
   db: Database,
   exportData: WorkflowyExportResponse,
   source: BackupSnapshotMetadata["source"],
@@ -481,7 +574,7 @@ function writeBackupSnapshot(
   const backupDate = getLocalDateKey(now);
   const backupId = `${BACKUP_FILE_PREFIX}-${sanitizeTimestampForFilename(createdAt)}`;
   const filename = `${backupId}.json`;
-  const { dataPath, metadataPath } = getBackupPaths(backupId);
+  const { dataPath, metadataPath } = getBackupPaths(account, backupId);
 
   const snapshot: BackupSnapshotRecord = {
     format: BACKUP_FORMAT,
@@ -515,7 +608,7 @@ function writeBackupSnapshot(
     "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_backup_id', ?)",
     [backupId],
   );
-  saveDb();
+  saveDbForAccount(account);
 
   return {
     ...metadata,
@@ -547,6 +640,7 @@ async function fetchNodesExport(apiKey: string): Promise<WorkflowyExportResponse
 }
 
 function replaceNodesCache(
+  account: Account,
   db: Database,
   nodes: WorkflowyExportNode[],
   syncedAt: string,
@@ -603,7 +697,7 @@ function replaceNodesCache(
     );
 
     db.run("COMMIT");
-    saveDb();
+    saveDbForAccount(account);
   } catch (error) {
     try {
       db.run("ROLLBACK");
@@ -615,7 +709,7 @@ function replaceNodesCache(
 }
 
 async function createBackupFromApi(
-  apiKey: string,
+  account: Account,
   db: Database,
   source: BackupSnapshotMetadata["source"],
 ): Promise<{
@@ -632,12 +726,12 @@ async function createBackupFromApi(
   }
 
   try {
-    const exportData = await fetchNodesExport(apiKey);
-    const backup = writeBackupSnapshot(db, exportData, source);
-    const pruneResult = pruneOldBackups(db);
+    const exportData = await fetchNodesExport(account.apiKey);
+    const backup = writeBackupSnapshot(account, db, exportData, source);
+    const pruneResult = pruneOldBackups(db, account);
     if (pruneResult.deletedIds.length > 0) {
       writeMcpLog(
-        `Pruned ${pruneResult.deletedIds.length} old backup${pruneResult.deletedIds.length === 1 ? "" : "s"} to keep the latest ${pruneResult.maxBackups}.`,
+        `Pruned ${pruneResult.deletedIds.length} old backup${pruneResult.deletedIds.length === 1 ? "" : "s"} for account "${account.name}" to keep the last ${pruneResult.retentionDays} day${pruneResult.retentionDays === 1 ? "" : "s"}.`,
         "info",
       );
     }
@@ -651,7 +745,7 @@ async function createBackupFromApi(
 }
 
 async function ensureDailyBackup(
-  apiKey: string,
+  account: Account,
   db: Database,
 ): Promise<{
   created: boolean;
@@ -660,14 +754,14 @@ async function ensureDailyBackup(
   error?: string;
 }> {
   const today = getLocalDateKey();
-  if (hasBackupForDate(today)) {
+  if (hasBackupForDate(account, today)) {
     return {
       created: false,
       skipped: `Backup already exists for ${today}.`,
     };
   }
 
-  const result = await createBackupFromApi(apiKey, db, "daily");
+  const result = await createBackupFromApi(account, db, "daily");
   if (!result.success) {
     return {
       created: false,
@@ -756,7 +850,7 @@ function getCacheSyncState(db: Database): {
   return { nodeCount, lastSync, needsSync };
 }
 
-function markCacheStale(db: Database): void {
+function markCacheStale(db: Database, account: Account): void {
   const staleTimestamp = new Date(
     Date.now() - STALE_THRESHOLD_MS - 1000,
   ).toISOString();
@@ -764,7 +858,7 @@ function markCacheStale(db: Database): void {
     "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_full_sync', ?)",
     [staleTimestamp],
   );
-  saveDb();
+  saveDbForAccount(account);
 }
 
 // Delete a node and all its descendants recursively
@@ -785,6 +879,7 @@ function deleteNodeAndDescendants(db: Database, nodeId: string): void {
 // Update node cache after write operations
 function updateNodeCache(
   db: Database,
+  account: Account,
   operation: "insert" | "update" | "delete",
   nodeData: {
     id: string;
@@ -836,13 +931,12 @@ function updateNodeCache(
       deleteNodeAndDescendants(db, nodeData.id);
       break;
   }
-  saveDb();
+  saveDbForAccount(account);
 }
 
 // Perform full sync of all nodes from Workflowy API
 async function performFullSync(
-  apiKey: string,
-  db: Database,
+  account: Account,
 ): Promise<{
   success: boolean;
   nodes_synced?: number;
@@ -852,6 +946,7 @@ async function performFullSync(
   backup_path?: string;
   error?: string;
 }> {
+  const db = await getDbForAccount(account);
   // Check rate limit
   const { allowed, waitMs } = canCallExport();
   if (!allowed) {
@@ -899,35 +994,35 @@ async function performFullSync(
     "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('sync_started_at', ?)",
     [new Date().toISOString()],
   );
-  saveDb();
+  saveDbForAccount(account);
 
   try {
-    const responseData = await fetchNodesExport(apiKey);
+    const responseData = await fetchNodesExport(account.apiKey);
     const nodes = responseData.nodes;
     const now = new Date().toISOString();
 
     let dailyBackup:
       | (BackupSnapshotMetadata & { path: string; size_bytes: number })
       | null = null;
-    if (!hasBackupForDate(getLocalDateKey())) {
+    if (!hasBackupForDate(account, getLocalDateKey())) {
       try {
-        dailyBackup = writeBackupSnapshot(db, responseData, "daily");
-        const pruneResult = pruneOldBackups(db);
+        dailyBackup = writeBackupSnapshot(account, db, responseData, "daily");
+        const pruneResult = pruneOldBackups(db, account);
         if (pruneResult.deletedIds.length > 0) {
           writeMcpLog(
-            `Pruned ${pruneResult.deletedIds.length} old backup${pruneResult.deletedIds.length === 1 ? "" : "s"} to keep the latest ${pruneResult.maxBackups}.`,
+            `Pruned ${pruneResult.deletedIds.length} old backup${pruneResult.deletedIds.length === 1 ? "" : "s"} for account "${account.name}" to keep the last ${pruneResult.retentionDays} day${pruneResult.retentionDays === 1 ? "" : "s"}.`,
             "info",
           );
         }
       } catch (backupError) {
         writeMcpLog(
-          `Daily backup creation failed during sync: ${backupError}`,
+          `Daily backup creation failed during sync for account "${account.name}": ${backupError}`,
           "warning",
         );
       }
     }
 
-    replaceNodesCache(db, nodes, now);
+    replaceNodesCache(account, db, nodes, now);
 
     return {
       success: true,
@@ -941,7 +1036,7 @@ async function performFullSync(
     db.run(
       "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('sync_in_progress', 'false')",
     );
-    saveDb();
+    saveDbForAccount(account);
 
     return {
       success: false,
@@ -952,9 +1047,9 @@ async function performFullSync(
 
 // Ensure cache is fresh before read operations (auto-sync if needed)
 async function ensureCacheFresh(
-  apiKey: string,
-  db: Database,
+  account: Account,
 ): Promise<{ synced: boolean; error?: string }> {
+  const db = await getDbForAccount(account);
   const { needsSync } = getCacheSyncState(db);
 
   if (!needsSync) {
@@ -968,7 +1063,7 @@ async function ensureCacheFresh(
   }
 
   // Perform sync
-  const result = await performFullSync(apiKey, db);
+  const result = await performFullSync(account);
   if (result.success) {
     return { synced: true };
   }
@@ -977,17 +1072,17 @@ async function ensureCacheFresh(
 
 // Sync a single node from the API and update cache
 async function syncSingleNode(
-  apiKey: string,
-  db: Database,
+  account: Account,
   nodeId: string,
   parentIdOverride?: string | null,
 ): Promise<{ success: boolean; error?: string }> {
+  const db = await getDbForAccount(account);
   try {
     const url = `https://workflowy.com/api/v1/nodes/${nodeId}`;
     const res = await fetch(url, {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${account.apiKey}`,
         "Content-Type": "application/json",
       },
     });
@@ -996,7 +1091,7 @@ async function syncSingleNode(
       if (res.status === 404) {
         // Node was deleted - remove from cache
         deleteNodeFromCache(db, nodeId);
-        saveDb();
+        saveDbForAccount(account);
         return { success: true };
       }
       throw new Error(`API error: ${res.status} ${res.statusText}`);
@@ -1045,7 +1140,7 @@ async function syncSingleNode(
         node.completedAt ? new Date(node.completedAt * 1000).toISOString() : null,
       ],
     );
-    saveDb();
+    saveDbForAccount(account);
 
     return { success: true };
   } catch (error) {
@@ -1058,10 +1153,10 @@ async function syncSingleNode(
 
 // Sync children of a node from the API and update cache (1 level only)
 async function syncNodeChildren(
-  apiKey: string,
-  db: Database,
+  account: Account,
   parentId: string | null, // null for top-level, "inbox"/"home" for targets, or UUID
 ): Promise<{ success: boolean; error?: string }> {
+  const db = await getDbForAccount(account);
   try {
     // Build the URL with parent_id query param
     let url = "https://workflowy.com/api/v1/nodes";
@@ -1074,7 +1169,7 @@ async function syncNodeChildren(
     const res = await fetch(url, {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${account.apiKey}`,
         "Content-Type": "application/json",
       },
     });
@@ -1097,7 +1192,7 @@ async function syncNodeChildren(
 
     const nodes = responseData.nodes || [];
     
-    writeMcpLog(`[syncNodeChildren] Parent: ${parentId}, API returned ${nodes.length} children`, "info");
+    writeMcpLog(`[syncNodeChildren] Account "${account.name}", parent: ${parentId}, API returned ${nodes.length} children`, "info");
     if (nodes.length > 0) {
       writeMcpLog(`[syncNodeChildren] Children: ${nodes.map(n => n.name?.substring(0, 30)).join(', ')}`, "info");
     }
@@ -1161,7 +1256,7 @@ async function syncNodeChildren(
       );
     }
 
-    saveDb();
+    saveDbForAccount(account);
     return { success: true };
   } catch (error) {
     return {
@@ -1531,37 +1626,18 @@ function decodeSyncTarget(parentId: string): string | null {
   return parentId === "__ROOT__" ? null : parentId;
 }
 
-// Get API key from environment or config file
-function getApiKey(): string {
-  // First check environment variable
-  if (process.env.WORKFLOWY_API_KEY) {
-    return process.env.WORKFLOWY_API_KEY;
-  }
-
-  // Then check config file
-  const config = loadConfig();
-  if (config.apiKey) {
-    return config.apiKey;
-  }
-
-  throw new Error(
-    "Workflowy API key not configured. Please set it in the app settings.",
-  );
-}
-
-async function getValidatedApiKey(): Promise<string> {
-  const apiKey = getApiKey();
-  await validateWorkflowyToken(apiKey);
-  return apiKey;
+async function validateAccount(account: Account): Promise<Account> {
+  await validateWorkflowyToken(account.apiKey);
+  return account;
 }
 
 async function refreshCacheAfterEdit(
-  apiKey: string,
+  account: Account,
   db: Database,
   root: string,
   operations: LlmDocOperation[],
 ): Promise<void> {
-  markCacheStale(db);
+  markCacheStale(db, account);
 
   const parentTargets = new Set<string>();
   const nodeSyncRequests = new Map<string, string | null | undefined>();
@@ -1610,13 +1686,13 @@ async function refreshCacheAfterEdit(
   }
 
   for (const parentTarget of parentTargets) {
-    await syncNodeChildren(apiKey, db, decodeSyncTarget(parentTarget)).catch(
+    await syncNodeChildren(account, decodeSyncTarget(parentTarget)).catch(
       () => {},
     );
   }
 
   for (const [nodeId, parentIdOverride] of nodeSyncRequests.entries()) {
-    await syncSingleNode(apiKey, db, nodeId, parentIdOverride).catch(() => {});
+    await syncSingleNode(account, nodeId, parentIdOverride).catch(() => {});
   }
 }
 
@@ -1806,13 +1882,43 @@ async function llmDocEdit(
   };
 }
 
+const accountSchemaProperty = {
+  account: {
+    type: "string",
+    description:
+      "Account name to use. Defaults to the configured default Workflowy account.",
+  },
+};
+
+function getAccountSchemaProperty() {
+  const accountNames = accounts.map((account) => account.name);
+  const defaultAccount = getDefaultAccount();
+  const description =
+    accountNames.length > 1
+      ? `Account name to use. Available accounts: ${accountNames.map((name) => `"${name}"`).join(", ")}. Defaults to "${defaultAccount.name}". Use this parameter whenever the user asks about a specific account.`
+      : `Account name to use. Defaults to "${defaultAccount.name}".`;
+
+  return {
+    account: {
+      type: "string",
+      description,
+      ...(accountNames.length > 1 ? { enum: accountNames } : {}),
+    },
+  };
+}
+
 // Default tool definitions - descriptions imported from shared/constants.ts
 const defaultTools = [
+  {
+    name: "list_accounts",
+    description: toolDescriptions.list_accounts,
+    inputSchema: { type: "object", properties: {} },
+  },
   // This tool MUST be first - it's the entry point for every conversation
   {
     name: "list_bookmarks",
     description: toolDescriptions.list_bookmarks,
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", properties: { ...accountSchemaProperty } },
   },
   // Bookmark tools
   {
@@ -1821,6 +1927,7 @@ const defaultTools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...accountSchemaProperty,
         name: {
           type: "string",
           description:
@@ -1845,6 +1952,7 @@ const defaultTools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...accountSchemaProperty,
         name: { type: "string", description: "The bookmark name to delete" },
       },
       required: ["name"],
@@ -1857,6 +1965,7 @@ const defaultTools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...accountSchemaProperty,
         node_id: {
           type: "string",
           description:
@@ -1877,6 +1986,7 @@ const defaultTools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...accountSchemaProperty,
         root: {
           type: "string",
           description:
@@ -1963,6 +2073,7 @@ const defaultTools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...accountSchemaProperty,
         query: {
           type: "string",
           description: "Search text (searches name and note fields)",
@@ -1985,6 +2096,7 @@ const defaultTools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...accountSchemaProperty,
         force: {
           type: "boolean",
           description:
@@ -1996,12 +2108,12 @@ const defaultTools = [
   {
     name: "list_backups",
     description: toolDescriptions.list_backups,
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", properties: { ...accountSchemaProperty } },
   },
   {
     name: "create_backup",
     description: toolDescriptions.create_backup,
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", properties: { ...accountSchemaProperty } },
   },
   {
     name: "restore_backup",
@@ -2009,6 +2121,7 @@ const defaultTools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...accountSchemaProperty,
         backup_id: {
           type: "string",
           description: "The backup ID returned by list_backups",
@@ -2023,6 +2136,7 @@ const defaultTools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...accountSchemaProperty,
         backup_id: {
           type: "string",
           description: "The backup ID returned by list_backups",
@@ -2042,11 +2156,25 @@ const defaultTools = [
 function getTools() {
   const config = loadConfig();
   const customDescriptions = config.toolDescriptions || {};
+  const dynamicAccountProperty = getAccountSchemaProperty().account;
 
-  return defaultTools.map((tool) => ({
-    ...tool,
-    description: customDescriptions[tool.name] || tool.description,
-  }));
+  return defaultTools.map((tool) => {
+    const inputSchema = tool.name === "list_accounts"
+      ? tool.inputSchema
+      : {
+          ...tool.inputSchema,
+          properties: {
+            ...tool.inputSchema.properties,
+            account: dynamicAccountProperty,
+          },
+        };
+
+    return {
+      ...tool,
+      description: customDescriptions[tool.name] || tool.description,
+      inputSchema,
+    };
+  });
 }
 
 // Default server instructions are imported from shared/constants.ts
@@ -2055,12 +2183,21 @@ function getTools() {
 function getServerInstructions(db: Database | null): string {
   const config = loadConfig();
   const baseInstructions = config.serverDescription || defaultServerInstructions;
+  const defaultAccount = getDefaultAccount();
+  let instructions = baseInstructions;
+
+  if (accounts.length > 0) {
+    const accountLines = accounts
+      .map((account) => `- "${account.name}"${account.id === defaultAccount.id ? " (default)" : ""}`)
+      .join("\n");
+    instructions += `\n\n## Connected Accounts\n${accountLines}\nUse the \`account\` parameter on Workflowy tools to target a specific account. Defaults to "${defaultAccount.name}". These exact account names are also listed in tool schemas.`;
+  }
   
   // Try to append user's custom AI instructions from Workflowy
   if (db) {
     const userInstructions = getAIInstructions(db);
     if (userInstructions) {
-      return `${baseInstructions}
+      return `${instructions}
 
 ## User's Custom Instructions
 The user has configured the following custom instructions in their Workflowy "AI Instructions" node. Follow these preferences:
@@ -2069,26 +2206,32 @@ ${userInstructions}`;
     }
   }
   
-  return baseInstructions;
+  return instructions;
 }
 
 // Main server setup
 async function main() {
+  accounts = loadAccounts();
+  if (accounts.length === 0) {
+    throw new Error("No Workflowy accounts configured.");
+  }
+
+  const defaultAccount = getDefaultAccount();
   // Initialize DB early so we can load user's custom instructions for the server
-  const db = await getDb();
+  const db = await getDbForAccount(defaultAccount);
   
   // Try to sync ai_instructions bookmark children before loading instructions
   // This ensures we have fresh data at startup
   try {
-    const apiKey = await getValidatedApiKey();
+    await validateAccount(defaultAccount);
     const bookmarkResult = db.exec(
       "SELECT node_id FROM bookmarks WHERE name = ?",
       [AI_INSTRUCTIONS_BOOKMARK],
     );
     if (bookmarkResult.length > 0 && bookmarkResult[0].values.length > 0) {
       const nodeId = bookmarkResult[0].values[0][0] as string;
-      await syncSingleNode(apiKey, db, nodeId).catch(() => {});
-      await syncNodeChildren(apiKey, db, nodeId).catch(() => {});
+      await syncSingleNode(defaultAccount, nodeId).catch(() => {});
+      await syncNodeChildren(defaultAccount, nodeId).catch(() => {});
     }
   } catch {
     // Ignore errors - may not have API key configured yet
@@ -2132,12 +2275,13 @@ async function main() {
 
     if (name === "server_instructions") {
       // Get db to load user's custom AI instructions
-      const db = await getDb();
+      const defaultAccount = getDefaultAccount();
+      const db = await getDbForAccount(defaultAccount);
       
       // Auto-sync at the start of each conversation (if cache is stale)
       try {
-        const apiKey = await getValidatedApiKey();
-        await ensureCacheFresh(apiKey, db);
+        await validateAccount(defaultAccount);
+        await ensureCacheFresh(defaultAccount);
       } catch (e) {
         // Ignore sync errors - instructions can still be returned
         writeMcpLog(`Auto-sync on conversation start failed: ${e}`, "warning");
@@ -2163,11 +2307,40 @@ async function main() {
   // Call tool handler
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    const db = await getDb();
 
     switch (name) {
+      case "list_accounts": {
+        const defaultAccount = getDefaultAccount();
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  accounts: accounts.map((account) => ({
+                    name: account.name,
+                    id: account.id,
+                    is_default: account.id === defaultAccount.id,
+                  })),
+                  default_account: defaultAccount.name,
+                  account_count: accounts.length,
+                  account_usage:
+                    accounts.length > 1
+                      ? `Use the account parameter with one of these exact names: ${accounts.map((account) => `"${account.name}"`).join(", ")}. These names are already available in server instructions and tool schemas.`
+                      : "Only one Workflowy account is configured.",
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
       // Bookmark operations
       case "save_bookmark": {
+        const acct = resolveAccount(args?.account as string | undefined);
+        const db = await getDbForAccount(acct);
         const name = args?.name as string;
         const nodeId = args?.node_id as string;
         const context = (args?.context as string) || null;
@@ -2178,18 +2351,20 @@ async function main() {
           "INSERT INTO bookmarks (name, node_id, context) VALUES (?, ?, ?)",
           [name, nodeId, context],
         );
-        saveDb();
+        saveDbForAccount(acct);
         return {
           content: [
             {
               type: "text",
-              text: `Bookmark "${name}" saved with node ID: ${nodeId}${context ? ` and context: "${context}"` : ""}`,
+              text: `Bookmark "${name}" saved in account "${acct.name}" with node ID: ${nodeId}${context ? ` and context: "${context}"` : ""}`,
             },
           ],
         };
       }
 
       case "list_bookmarks": {
+        const acct = resolveAccount(args?.account as string | undefined);
+        const db = await getDbForAccount(acct);
         const results = db.exec(
           "SELECT name, node_id, context, created_at FROM bookmarks ORDER BY name",
         );
@@ -2207,25 +2382,26 @@ async function main() {
         // For ai_instructions, we await to ensure fresh data for the response
         // For others, sync in background
         const aiInstructionsBookmark = rows.find(r => r.name === AI_INSTRUCTIONS_BOOKMARK);
-        let apiKey: string | null = null;
+        let accountIsValid = false;
 
         try {
-          apiKey = await getValidatedApiKey();
+          await validateAccount(acct);
+          accountIsValid = true;
         } catch {
-          apiKey = null;
+          accountIsValid = false;
         }
         
         // Await sync for ai_instructions so we get fresh data
-        if (apiKey && aiInstructionsBookmark?.node_id) {
-          await syncSingleNode(apiKey, db, aiInstructionsBookmark.node_id).catch(() => {});
-          await syncNodeChildren(apiKey, db, aiInstructionsBookmark.node_id).catch(() => {});
+        if (accountIsValid && aiInstructionsBookmark?.node_id) {
+          await syncSingleNode(acct, aiInstructionsBookmark.node_id).catch(() => {});
+          await syncNodeChildren(acct, aiInstructionsBookmark.node_id).catch(() => {});
         }
         
         // Sync other bookmarks in background
-        if (apiKey) {
+        if (accountIsValid) {
           for (const row of rows) {
             if (row.node_id && row.name !== AI_INSTRUCTIONS_BOOKMARK) {
-              syncNodeChildren(apiKey, db, row.node_id).catch(() => {});
+              syncNodeChildren(acct, row.node_id).catch(() => {});
             }
           }
         }
@@ -2236,13 +2412,28 @@ async function main() {
         // Build response with clear guidance for the LLM
         const response: {
           _instructions: string;
+          current_account: { name: string; is_default: boolean };
+          connected_accounts: Array<{ name: string; is_default: boolean }>;
           bookmarks: typeof rows;
           user_instructions?: string;
           action_required?: string;
+          account_usage?: string;
         } = {
           _instructions: "READ THIS FIRST: Check user_instructions below for the user's custom AI preferences. Follow them for this entire conversation.",
+          current_account: {
+            name: acct.name,
+            is_default: acct.id === getDefaultAccount().id,
+          },
+          connected_accounts: accounts.map((account) => ({
+            name: account.name,
+            is_default: account.id === getDefaultAccount().id,
+          })),
           bookmarks: rows,
         };
+
+        if (accounts.length > 1) {
+          response.account_usage = `Multiple Workflowy accounts are connected. To inspect another account, call this tool again with account set to one of: ${accounts.map((account) => `"${account.name}"`).join(", ")}. All Workflowy tools accept the same optional account parameter.`;
+        }
         
         if (aiInstructions) {
           response.user_instructions = aiInstructions;
@@ -2260,6 +2451,8 @@ async function main() {
       }
 
       case "delete_bookmark": {
+        const acct = resolveAccount(args?.account as string | undefined);
+        const db = await getDbForAccount(acct);
         const bookmarkName = args?.name as string;
         const before = db.exec(
           "SELECT COUNT(*) FROM bookmarks WHERE name = ?",
@@ -2268,7 +2461,7 @@ async function main() {
         const count =
           before.length > 0 ? (before[0].values[0][0] as number) : 0;
         db.run("DELETE FROM bookmarks WHERE name = ?", [bookmarkName]);
-        saveDb();
+        saveDbForAccount(acct);
         if (count === 0) {
           return {
             content: [
@@ -2283,17 +2476,18 @@ async function main() {
 
       // LLM Doc API operations
       case "read_doc": {
-        const apiKey = await getValidatedApiKey();
+        const acct = await validateAccount(resolveAccount(args?.account as string | undefined));
         const nodeId = args?.node_id as string;
         const depth = Math.min(Math.max((args?.depth as number) ?? 3, 1), 10);
 
-        writeMcpLog(`[read_doc] Reading node: ${nodeId}, depth: ${depth}`, "info");
+        writeMcpLog(`[read_doc] Account "${acct.name}", reading node: ${nodeId}, depth: ${depth}`, "info");
         
-        return llmDocRead(apiKey, nodeId, depth);
+        return llmDocRead(acct.apiKey, nodeId, depth);
       }
 
       case "edit_doc": {
-        const apiKey = await getValidatedApiKey();
+        const acct = await validateAccount(resolveAccount(args?.account as string | undefined));
+        const db = await getDbForAccount(acct);
         const root = args?.root as string;
         const operations = args?.operations as LlmDocOperation[];
 
@@ -2319,11 +2513,11 @@ async function main() {
           };
         }
 
-        writeMcpLog(`[edit_doc] Editing root: ${root}, operations: ${JSON.stringify(operations)}`, "info");
+        writeMcpLog(`[edit_doc] Account "${acct.name}", editing root: ${root}, operations: ${JSON.stringify(operations)}`, "info");
 
-        const result = await llmDocEdit(apiKey, root, operations);
+        const result = await llmDocEdit(acct.apiKey, root, operations);
         if (result.success) {
-          await refreshCacheAfterEdit(apiKey, db, root, operations).catch(() => {});
+          await refreshCacheAfterEdit(acct, db, root, operations).catch(() => {});
         }
 
         return { content: result.content };
@@ -2331,11 +2525,13 @@ async function main() {
 
       // Cache and search operations
       case "search_nodes": {
+        const acct = resolveAccount(args?.account as string | undefined);
+        const db = await getDbForAccount(acct);
         const initialCacheState = getCacheSyncState(db);
         if (initialCacheState.needsSync) {
           try {
-            const apiKey = await getValidatedApiKey();
-            await ensureCacheFresh(apiKey, db);
+            await validateAccount(acct);
+            await ensureCacheFresh(acct);
           } catch {
             // Fall back to the local cache if we can't refresh it right now.
           }
@@ -2570,6 +2766,7 @@ async function main() {
               type: "text",
               text: JSON.stringify(
                 {
+                  account: acct.name,
                   query,
                   results: nodes,
                   total_found: nodes.length,
@@ -2586,8 +2783,8 @@ async function main() {
       }
 
       case "sync_nodes": {
-        const apiKey = await getValidatedApiKey();
-        const result = await performFullSync(apiKey, db);
+        const acct = await validateAccount(resolveAccount(args?.account as string | undefined));
+        const result = await performFullSync(acct);
         return {
           content: [
             {
@@ -2599,15 +2796,17 @@ async function main() {
       }
 
       case "list_backups": {
-        const backups = listBackupSnapshots();
+        const acct = resolveAccount(args?.account as string | undefined);
+        const backups = listBackupSnapshots(acct);
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify(
                 {
+                  account: acct.name,
                   backups,
-                  backup_directory: getBackupsDir(),
+                  backup_directory: getBackupsDir(acct),
                   total_backups: backups.length,
                 },
                 null,
@@ -2619,8 +2818,9 @@ async function main() {
       }
 
       case "create_backup": {
-        const apiKey = await getValidatedApiKey();
-        const result = await createBackupFromApi(apiKey, db, "manual");
+        const acct = await validateAccount(resolveAccount(args?.account as string | undefined));
+        const db = await getDbForAccount(acct);
+        const result = await createBackupFromApi(acct, db, "manual");
         return {
           content: [
             {
@@ -2632,10 +2832,12 @@ async function main() {
       }
 
       case "restore_backup": {
+        const acct = resolveAccount(args?.account as string | undefined);
+        const db = await getDbForAccount(acct);
         const backupId = args?.backup_id as string;
-        const { metadata, snapshot } = loadBackupSnapshot(backupId);
+        const { metadata, snapshot } = loadBackupSnapshot(acct, backupId);
 
-        replaceNodesCache(db, snapshot.export.nodes, metadata.created_at);
+        replaceNodesCache(acct, db, snapshot.export.nodes, metadata.created_at);
         db.run(
           "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_restored_backup_id', ?)",
           [metadata.id],
@@ -2644,7 +2846,7 @@ async function main() {
           "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_restore_at', ?)",
           [new Date().toISOString()],
         );
-        saveDb();
+        saveDbForAccount(acct);
 
         return {
           content: [
@@ -2653,6 +2855,7 @@ async function main() {
               text: JSON.stringify(
                 {
                   success: true,
+                  account: acct.name,
                   restored_backup: metadata,
                   restored_nodes: snapshot.export.nodes.length,
                   note: "This restores the local cache/search database from the backup file. It does not upload changes back into Workflowy.",
@@ -2666,9 +2869,10 @@ async function main() {
       }
 
       case "export_backup": {
+        const acct = resolveAccount(args?.account as string | undefined);
         const backupId = args?.backup_id as string;
         const destinationPath = args?.destination_path as string;
-        const backup = findBackupById(backupId);
+        const backup = findBackupById(acct, backupId);
 
         if (!backup) {
           return {
@@ -2704,6 +2908,7 @@ async function main() {
               text: JSON.stringify(
                 {
                   success: true,
+                  account: acct.name,
                   backup_id: backup.id,
                   source_path: backup.path,
                   destination_path: finalDestination,
@@ -2728,7 +2933,8 @@ async function main() {
 
   // Auto-sync on startup if cache is stale (>24 hours)
   try {
-    const db = await getDb();
+    const defaultAccount = getDefaultAccount();
+    const db = await getDbForAccount(defaultAccount);
 
     // Clear any stuck sync_in_progress flag from previous crashed sessions
     const inProgressResult = db.exec(
@@ -2742,7 +2948,7 @@ async function main() {
       db.run(
         "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('sync_in_progress', 'false')",
       );
-      saveDb();
+      saveDbForAccount(defaultAccount);
     }
 
     // Check last sync time
@@ -2758,46 +2964,46 @@ async function main() {
       shouldSync = hoursOld > 1;
     }
 
-    const pruneResult = pruneOldBackups(db);
-    if (pruneResult.deletedIds.length > 0 && pruneResult.maxBackups !== null) {
+    const pruneResult = pruneOldBackups(db, defaultAccount);
+    if (pruneResult.deletedIds.length > 0 && pruneResult.retentionDays !== null) {
       writeMcpLog(
-        `Pruned ${pruneResult.deletedIds.length} old backup${pruneResult.deletedIds.length === 1 ? "" : "s"} to keep the latest ${pruneResult.maxBackups}.`,
+        `Pruned ${pruneResult.deletedIds.length} old backup${pruneResult.deletedIds.length === 1 ? "" : "s"} for account "${defaultAccount.name}" to keep the last ${pruneResult.retentionDays} day${pruneResult.retentionDays === 1 ? "" : "s"}.`,
         "info",
       );
     }
 
-    const apiKey = await getValidatedApiKey();
+    await validateAccount(defaultAccount);
 
     if (shouldSync) {
-      writeMcpLog("Cache is stale or empty, starting background sync...", "info");
+      writeMcpLog(`Cache for account "${defaultAccount.name}" is stale or empty, starting background sync...`, "info");
       // Run sync in background (don't await)
-      performFullSync(apiKey, db)
+      performFullSync(defaultAccount)
         .then((result) => {
           if (result.success) {
             writeMcpLog(
-              `Background sync complete: ${result.nodes_synced} nodes synced`,
+              `Background sync complete for account "${defaultAccount.name}": ${result.nodes_synced} nodes synced`,
               "success"
             );
             if (result.backup_created && result.backup_id) {
               writeMcpLog(
-                `Daily backup saved during sync: ${result.backup_id}`,
+                `Daily backup saved during sync for account "${defaultAccount.name}": ${result.backup_id}`,
                 "success",
               );
             }
           } else {
-            writeMcpLog(`Background sync failed: ${result.error}`, "error");
+            writeMcpLog(`Background sync failed for account "${defaultAccount.name}": ${result.error}`, "error");
           }
         })
         .catch((err) => {
-          writeMcpLog(`Background sync error: ${err}`, "error");
+          writeMcpLog(`Background sync error for account "${defaultAccount.name}": ${err}`, "error");
         });
     } else {
-      writeMcpLog("Cache is fresh, skipping auto-sync", "info");
-      ensureDailyBackup(apiKey, db)
+      writeMcpLog(`Cache for account "${defaultAccount.name}" is fresh, skipping auto-sync`, "info");
+      ensureDailyBackup(defaultAccount, db)
         .then((result) => {
           if (result.created && result.backup) {
             writeMcpLog(
-              `Daily backup saved: ${result.backup.id}`,
+              `Daily backup saved for account "${defaultAccount.name}": ${result.backup.id}`,
               "success",
             );
           } else if (result.skipped) {

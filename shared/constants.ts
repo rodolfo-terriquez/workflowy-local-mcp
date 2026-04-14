@@ -182,6 +182,10 @@ search_nodes searches the local cache by text. Use it when you don't know where 
 // Tool descriptions - single source of truth for both MCP server and frontend
 // These are the descriptions shown in the MCP protocol and in the UI
 export const toolDescriptions = {
+  list_accounts: `List the Workflowy accounts configured in this MCP server.
+
+The server instructions and tool schemas already include available account names when multiple accounts are configured. Use this tool when you need to verify connected accounts, identify the default account, or answer a user question about configured accounts.`,
+
   list_bookmarks: `**START EVERY CONVERSATION BY CALLING THIS TOOL.** Returns saved Workflowy locations AND the user's custom AI instructions.
 
 The response contains:
@@ -291,6 +295,7 @@ Create a table:
 
 // Tool names in the order they should appear
 export const toolNames = [
+  "list_accounts",
   "list_bookmarks",
   "save_bookmark",
   "delete_bookmark",
