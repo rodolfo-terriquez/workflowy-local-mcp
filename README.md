@@ -80,15 +80,38 @@ The Tauri-based desktop app provides a UI for configuration and monitoring:
 - **Cache** — view cache status and trigger a manual sync
 - **Logs** — view MCP server logs in real time (auto-refreshes every 3 seconds)
 
-## AI Instructions
+## AI Section
+The real power of the MCP server comes from building a persistent `AI` section in your Workflowy account. This gives your AI assistant a stable, session-persistent context — it knows your name, your structure, your workflows, and what to do every morning without you having to explain it each time.
 
-You can create a node called "AI Instructions" in Workflowy to set persistent preferences for how LLMs interact with your data. For example:
+The system has three parts, each saved as a named bookmark:
 
-- "Always add new tasks to my #inbox"
-- "Use checkboxes for tasks, not bullets"
-- "My calendar is under 'Daily Notes > 2025'"
+| Bookmark | Node | Purpose |
+|---|---|---|
+| `ai_instructions` | AI Instructions | Tells the AI who you are, how your account is structured, and what workflows to run |
+| `ai_memory` | AI Memory | Persistent notes the AI writes to itself - MCP quirks, patterns, things it learned about you |
+| `ai_skills` | AI Skills | Reusable workflows with step-by-step instructions for APIs  or tools you use regularly |
 
-The LLM will search for this node, save it as a reserved `ai_instructions` bookmark, and automatically load it at the start of every conversation.
+**AI Instructions** is the core. At minimum, it should describe your account layout and set behavioral preferences:
+```
+🤖 AI Instructions
+  ├── When Starting Conversations
+  │   ├── Read these instructions and check AI Memory for quirks
+  │   └── Run the Morning Briefing skill — handles Now items, inbox triage, log follow-ups
+  ├── About This Account
+  │   └── Personal Workflowy for [Name] — daily planning, projects, knowledge base
+  ├── Key Locations
+  │   ├── 📥 Inbox — capture point for all ideas
+  │   ├── 🌞 Daily — weekly planning + Now (today's focus) + Calendar log
+  │   └── 📁 Topics — knowledge base and reference material
+  ├── User Preferences
+  │   └── Concise, conversational — clear takeaways, not walls of data
+  └── Constraints
+      ├── Always confirm before deleting
+      └── Use regular bullets only (no headings) when logging
+```
+**AI Memory** starts empty and fills up naturally. The AI writes to it when it discovers something worth remembering — an MCP quirk it hit, a pattern in how you work, a useful node ID. It persists across sessions so you never have to re-explain the same thing twice.
+
+**AI Skills** holds reusable workflows. A useful starting skill is a **Morning Briefing** — a set of steps the AI runs every session start: check specific lists, triage the inbox, scan yesterday's log or calendar for anything left hanging, run any recurring checks (API calls, commit logs, whatever your workflow involves).
 
 ## Data Storage
 
