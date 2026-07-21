@@ -9,6 +9,13 @@ import {
   isValidAccountName,
   type StoredAccountConfig,
 } from "../shared/accounts";
+import {
+  DEFAULT_API_ENVIRONMENT,
+  getEnvironmentDataDirName,
+  getPublicApiUrl,
+  normalizeApiEnvironment,
+  type WorkflowyApiEnvironment,
+} from "../shared/api-environment";
 import { checkForAppUpdatesOnLaunch, installUpdate, skipVersion, getAvailableAppUpdate, type UpdateProgress } from "./services/updater";
 
 interface LogEntry {
@@ -66,6 +73,7 @@ interface AppConfig {
   toolDescriptions?: Record<string, string>;
   backupRetentionDays?: number | null;
   maxBackups?: number | null;
+  apiEnvironment?: WorkflowyApiEnvironment;
 }
 
 function initParticleBackground(canvas: HTMLCanvasElement): () => void {
@@ -275,6 +283,9 @@ function App() {
   const [accounts, setAccounts] = useState<WorkflowyAccount[]>([]);
   const [defaultAccountId, setDefaultAccountId] = useState("default");
   const [selectedAccountId, setSelectedAccountId] = useState("default");
+  const [apiEnvironment, setApiEnvironment] = useState<WorkflowyApiEnvironment>(
+    DEFAULT_API_ENVIRONMENT,
+  );
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [toast, setToast] = useState<{
     message: string;
@@ -391,19 +402,19 @@ function App() {
     if (activeSection === "cache" && selectedApiKey) {
       void loadCacheStatus();
     }
-  }, [activeSection, selectedAccountId, selectedApiKey]);
+  }, [activeSection, selectedAccountId, selectedApiKey, apiEnvironment]);
 
   useEffect(() => {
     if (appMode === "settings" && activeSection === "bookmarks") {
       void loadBookmarks();
     }
-  }, [appMode, activeSection, selectedAccountId]);
+  }, [appMode, activeSection, selectedAccountId, apiEnvironment]);
 
   useEffect(() => {
     if (activeSection === "backups") {
       void loadBackups();
     }
-  }, [activeSection, selectedAccountId]);
+  }, [activeSection, selectedAccountId, apiEnvironment]);
 
   // Load MCP logs when logs section is active
   useEffect(() => {
@@ -426,7 +437,7 @@ function App() {
     if (appMode === "dashboard" && configLoaded) {
       void loadBackups();
     }
-  }, [appMode, configLoaded, selectedAccountId]);
+  }, [appMode, configLoaded, selectedAccountId, apiEnvironment]);
 
   useEffect(() => {
     if (showParticleCanvas && particleCanvasRef.current) {
@@ -439,7 +450,7 @@ function App() {
 
     try {
       const { fetch } = await import("@tauri-apps/plugin-http");
-      const response = await fetch("https://workflowy.com/api/v1/targets", {
+      const response = await fetch(getPublicApiUrl(apiEnvironment, "/targets"), {
         method: "GET",
         headers: {
           Authorization: `Bearer ${selectedApiKey}`,
@@ -519,7 +530,10 @@ function App() {
       const dataDir = selectedAccount
         ? await getAccountDataDir(selectedAccount.id)
         : await getDataDir();
-      const backupsDir = await join(dataDir, "backups");
+      const environmentDir = getEnvironmentDataDirName(apiEnvironment);
+      const backupsDir = environmentDir
+        ? await join(dataDir, environmentDir, "backups")
+        : await join(dataDir, "backups");
       setBackupDirectory(backupsDir);
 
       if (!(await exists(backupsDir))) {
@@ -634,7 +648,7 @@ function App() {
     try {
       const { fetch } = await import("@tauri-apps/plugin-http");
       const response = await fetch(
-        "https://workflowy.com/api/v1/nodes-export",
+        getPublicApiUrl(apiEnvironment, "/nodes-export"),
         {
           method: "GET",
           headers: {
@@ -703,6 +717,7 @@ function App() {
       if (await exists(configPath)) {
         const content = await readTextFile(configPath);
         const config = JSON.parse(content) as AppConfig;
+        setApiEnvironment(normalizeApiEnvironment(config.apiEnvironment));
         const normalized = normalizeAccountConfigs(config);
         if (normalized.accounts.length > 0) {
           setAccounts(normalized.accounts);
@@ -774,11 +789,11 @@ function App() {
 
   const getAccountDataDir = async (accountId: string): Promise<string> => {
     const dataDir = await getDataDir();
-    if (!accountId || accountId === "default") {
-      return dataDir;
-    }
     const { join } = await import("@tauri-apps/api/path");
-    return join(dataDir, accountId);
+    const accountDir = !accountId || accountId === "default"
+      ? dataDir
+      : await join(dataDir, accountId);
+    return accountDir;
   };
 
   const saveConfig = async (config: AppConfig) => {
@@ -813,7 +828,11 @@ function App() {
     overrides: Partial<AppConfig> = {},
     options: { maxBackups?: number | null; includeApiKey?: boolean } = {},
   ): AppConfig => {
-    const config: AppConfig = {};
+    const config: AppConfig = {
+      apiEnvironment: normalizeApiEnvironment(
+        overrides.apiEnvironment ?? apiEnvironment,
+      ),
+    };
     const includeApiKey = options.includeApiKey ?? true;
     const accountsToSave = overrides.accounts !== undefined ? overrides.accounts : accounts;
     const defaultAccountIdToSave =
@@ -977,7 +996,10 @@ function App() {
     try {
       addLog("Validating Workflowy accounts...", "info");
       for (const account of normalizedAccounts) {
-        await invoke("validate_api_key", { apiKey: account.apiKey });
+        await invoke("validate_api_key", {
+          apiKey: account.apiKey,
+          apiEnvironment,
+        });
       }
 
       const nextDefaultId =
@@ -1336,7 +1358,10 @@ function App() {
     setValidationError("");
     try {
       for (const account of nextAccounts) {
-        await invoke("validate_api_key", { apiKey: account.apiKey });
+        await invoke("validate_api_key", {
+          apiKey: account.apiKey,
+          apiEnvironment,
+        });
       }
       await saveConfig(
         buildConfig({
@@ -1938,6 +1963,29 @@ function App() {
                     Get your API key
                   </a>
                 </p>
+              </div>
+
+              <div className="api-environment-card">
+                <div className="input-group">
+                  <label htmlFor="api-environment">Public API environment</label>
+                  <select
+                    id="api-environment"
+                    value={apiEnvironment}
+                    onChange={(event) =>
+                      setApiEnvironment(
+                        normalizeApiEnvironment(event.target.value),
+                      )
+                    }
+                  >
+                    <option value="production">Production (default)</option>
+                    <option value="beta">Beta</option>
+                  </select>
+                  <p className="field-hint">
+                    {apiEnvironment === "beta"
+                      ? "Beta enables early public API features such as mirror tools. Your mileage may vary. Save, then restart your MCP client."
+                      : "Production is the stable default. Mirror tools currently require beta."}
+                  </p>
+                </div>
               </div>
 
               <div className="accounts-list">

@@ -18,6 +18,14 @@ import {
   parseLegacyAccountConfig,
   type StoredAccountConfig,
 } from "../shared/accounts.js";
+import {
+  DEFAULT_API_ENVIRONMENT,
+  getEnvironmentDataDirName,
+  getPublicApiBaseUrl,
+  getPublicApiUrl,
+  resolveApiEnvironment,
+  type WorkflowyApiEnvironment,
+} from "../shared/api-environment.js";
 
 // Config interface
 interface Config {
@@ -28,6 +36,7 @@ interface Config {
   toolDescriptions?: Record<string, string>;
   backupRetentionDays?: number | null;
   maxBackups?: number | null;
+  apiEnvironment?: WorkflowyApiEnvironment;
 }
 
 const DEFAULT_BACKUP_RETENTION_DAYS = 3;
@@ -95,7 +104,10 @@ function ensureDirExists(dirPath: string): void {
 }
 
 function getBackupsDir(account: Account): string {
-  const backupsDir = path.join(account.dataDir, "backups");
+  const environmentDir = getEnvironmentDataDirName(apiEnvironment);
+  const backupsDir = environmentDir
+    ? path.join(account.dataDir, environmentDir, "backups")
+    : path.join(account.dataDir, "backups");
   ensureDirExists(backupsDir);
   return backupsDir;
 }
@@ -139,6 +151,7 @@ function getConfiguredBackupRetentionDays(): number | null {
 let SQL: initSqlJs.SqlJsStatic | null = null;
 let accounts: Account[] = [];
 let defaultAccountId: string | null = null;
+let apiEnvironment: WorkflowyApiEnvironment = DEFAULT_API_ENVIRONMENT;
 
 function loadAccounts(): Account[] {
   const baseDir = getDataDir();
@@ -161,7 +174,10 @@ function loadAccounts(): Account[] {
     const summary = loadedAccounts
       .map((account) => `"${account.name}"${account.id === defaultAccountId ? " (default)" : ""}`)
       .join(", ");
-    writeMcpLog(`Configured Workflowy accounts: ${summary}`, "info");
+    writeMcpLog(
+      `Configured Workflowy accounts: ${summary}; public API environment: ${apiEnvironment}`,
+      "info",
+    );
   } else {
     writeMcpLog("No Workflowy accounts configured", "warning");
   }
@@ -303,6 +319,24 @@ async function getDbForAccount(account: Account): Promise<Database> {
       value TEXT NOT NULL
     )
   `);
+
+  const environmentResult = db.exec(
+    "SELECT value FROM sync_meta WHERE key = 'public_api_environment'",
+  );
+  const storedEnvironment = environmentResult[0]?.values[0]?.[0] as string | undefined;
+  const assumedEnvironment = storedEnvironment ?? DEFAULT_API_ENVIRONMENT;
+  if (assumedEnvironment !== apiEnvironment) {
+    db.run("DELETE FROM nodes");
+    db.run("DELETE FROM sync_meta");
+    writeMcpLog(
+      `Public API environment changed from ${assumedEnvironment} to ${apiEnvironment}; cleared the node cache while preserving bookmarks.`,
+      "info",
+    );
+  }
+  db.run(
+    "INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('public_api_environment', ?)",
+    [apiEnvironment],
+  );
 
   // Save after creating table
   saveDbForAccount(account);
@@ -620,7 +654,7 @@ function writeBackupSnapshot(
 async function fetchNodesExport(apiKey: string): Promise<WorkflowyExportResponse> {
   markExportCalled();
 
-  const url = "https://workflowy.com/api/v1/nodes-export";
+  const url = getPublicApiUrl(apiEnvironment, "/nodes-export");
   const res = await fetch(url, {
     method: "GET",
     headers: {
@@ -1078,7 +1112,10 @@ async function syncSingleNode(
 ): Promise<{ success: boolean; error?: string }> {
   const db = await getDbForAccount(account);
   try {
-    const url = `https://workflowy.com/api/v1/nodes/${nodeId}`;
+    const url = getPublicApiUrl(
+      apiEnvironment,
+      `/nodes/${encodeURIComponent(nodeId)}`,
+    );
     const res = await fetch(url, {
       method: "GET",
       headers: {
@@ -1159,7 +1196,7 @@ async function syncNodeChildren(
   const db = await getDbForAccount(account);
   try {
     // Build the URL with parent_id query param
-    let url = "https://workflowy.com/api/v1/nodes";
+    let url = getPublicApiUrl(apiEnvironment, "/nodes");
     if (parentId === null) {
       url += "?parent_id=None";
     } else {
@@ -1703,7 +1740,8 @@ async function workflowyRequest(
   method: "GET" | "POST" | "DELETE",
   body?: Record<string, unknown>,
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
-  const url = `https://workflowy.com${urlPath}`;
+  const normalizedPath = urlPath.replace(/^\/api\/v1/, "");
+  const url = getPublicApiUrl(apiEnvironment, normalizedPath);
 
   const res = await fetch(url, {
     method,
@@ -1738,7 +1776,7 @@ async function workflowyRequest(
 
 // Validate Workflowy token
 async function validateWorkflowyToken(apiKey: string): Promise<void> {
-  const res = await fetch("https://workflowy.com/api/v1/targets", {
+  const res = await fetch(getPublicApiUrl(apiEnvironment, "/targets"), {
     method: "GET",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -1748,6 +1786,76 @@ async function validateWorkflowyToken(apiKey: string): Promise<void> {
   if (!res.ok) {
     throw new Error("Invalid Workflowy API key");
   }
+}
+
+function requireBetaMirrorApi(): void {
+  if (apiEnvironment === "beta") {
+    return;
+  }
+  throw new Error(
+    "Workflowy mirror tools currently require the beta public API. In the Local MCP app, open Settings > Accounts, select Beta, save, and restart your MCP client. You can also set WORKFLOWY_API_ENVIRONMENT=beta before starting the server.",
+  );
+}
+
+interface PublicApiResponse {
+  http_status: number;
+  ok: boolean;
+  data: unknown;
+}
+
+async function publicApiJsonRequest(
+  apiKey: string,
+  path: string,
+  method: "GET" | "POST" | "DELETE",
+  body?: Record<string, unknown>,
+): Promise<PublicApiResponse> {
+  const response = await fetch(getPublicApiUrl(apiEnvironment, path), {
+    method,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text();
+  let data: unknown = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = { raw: text };
+  }
+  return { http_status: response.status, ok: response.ok, data };
+}
+
+function toolJson(data: unknown): {
+  content: Array<{ type: "text"; text: string }>;
+} {
+  return {
+    content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+  };
+}
+
+function getMirrorRelationship(node: unknown): {
+  role: "mirror" | "origin" | "regular";
+  origin_id: string | null;
+  mirror_ids: string[];
+} {
+  const record = node && typeof node === "object" ? node as Record<string, unknown> : {};
+  const data = record.data && typeof record.data === "object"
+    ? record.data as Record<string, unknown>
+    : {};
+  const mirror = data.mirror && typeof data.mirror === "object"
+    ? data.mirror as Record<string, unknown>
+    : {};
+  const originId = typeof mirror.origin_id === "string" ? mirror.origin_id : null;
+  const mirrorIds = Array.isArray(mirror.mirror_ids)
+    ? mirror.mirror_ids.filter((id): id is string => typeof id === "string")
+    : [];
+  return {
+    role: originId ? "mirror" : mirrorIds.length > 0 ? "origin" : "regular",
+    origin_id: originId,
+    mirror_ids: mirrorIds,
+  };
 }
 
 // LLM Doc API base URL
@@ -2066,6 +2174,65 @@ const defaultTools = [
       required: ["root", "operations"],
     },
   },
+  // Public API mirror tools (currently beta only)
+  {
+    name: "mirror_info",
+    description: toolDescriptions.mirror_info,
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...accountSchemaProperty,
+        node_id: {
+          type: "string",
+          description: "Full Workflowy node ID to inspect for mirror relationships.",
+        },
+      },
+      required: ["node_id"],
+    },
+  },
+  {
+    name: "create_mirror",
+    description: toolDescriptions.create_mirror,
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...accountSchemaProperty,
+        node_id: {
+          type: "string",
+          description: "Full ID of the origin node (or an existing mirror of it).",
+        },
+        parent_id: {
+          type: "string",
+          description: "Full ID of the destination parent for the new mirror.",
+        },
+        position: {
+          type: "string",
+          enum: ["top", "bottom"],
+          description: "Where to place the mirror under its destination parent (default: top).",
+        },
+      },
+      required: ["node_id", "parent_id"],
+    },
+  },
+  {
+    name: "remove_mirror",
+    description: toolDescriptions.remove_mirror,
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...accountSchemaProperty,
+        node_id: {
+          type: "string",
+          description: "Full ID of the mirror root to remove. Never pass the origin ID.",
+        },
+        confirm: {
+          type: "boolean",
+          description: "Must be true to confirm removal of this mirror root.",
+        },
+      },
+      required: ["node_id", "confirm"],
+    },
+  },
   // Cache and search tools
   {
     name: "search_nodes",
@@ -2192,6 +2359,7 @@ function getServerInstructions(db: Database | null): string {
       .join("\n");
     instructions += `\n\n## Connected Accounts\n${accountLines}\nUse the \`account\` parameter on Workflowy tools to target a specific account. Defaults to "${defaultAccount.name}". These exact account names are also listed in tool schemas.`;
   }
+  instructions += `\n\n## Public API Environment\nThe public Workflowy API is currently set to **${apiEnvironment}** (${getPublicApiBaseUrl(apiEnvironment)}). This setting controls cache sync, backups, validation, and mirror tools. The separate LLM Doc API used by read_doc and edit_doc is unchanged.`;
   
   // Try to append user's custom AI instructions from Workflowy
   if (db) {
@@ -2211,6 +2379,11 @@ ${userInstructions}`;
 
 // Main server setup
 async function main() {
+  const config = loadConfig();
+  apiEnvironment = resolveApiEnvironment(
+    config.apiEnvironment,
+    process.env.WORKFLOWY_API_ENVIRONMENT,
+  );
   accounts = loadAccounts();
   if (accounts.length === 0) {
     throw new Error("No Workflowy accounts configured.");
@@ -2242,7 +2415,7 @@ async function main() {
   const server = new Server(
     {
       name: "workflowy-mcp",
-      version: "1.0.0",
+      version: "1.5.3",
     },
     {
       capabilities: {
@@ -2324,6 +2497,8 @@ async function main() {
                   })),
                   default_account: defaultAccount.name,
                   account_count: accounts.length,
+                  api_environment: apiEnvironment,
+                  public_api_base_url: getPublicApiBaseUrl(apiEnvironment),
                   account_usage:
                     accounts.length > 1
                       ? `Use the account parameter with one of these exact names: ${accounts.map((account) => `"${account.name}"`).join(", ")}. These names are already available in server instructions and tool schemas.`
@@ -2521,6 +2696,113 @@ async function main() {
         }
 
         return { content: result.content };
+      }
+
+      case "mirror_info": {
+        requireBetaMirrorApi();
+        const acct = await validateAccount(resolveAccount(args?.account as string | undefined));
+        const nodeId = args?.node_id as string;
+        if (!nodeId) {
+          throw new Error("Missing required parameter: node_id");
+        }
+        const result = await publicApiJsonRequest(
+          acct.apiKey,
+          `/nodes/${encodeURIComponent(nodeId)}`,
+          "GET",
+        );
+        if (!result.ok) {
+          return toolJson({
+            error: true,
+            api_environment: apiEnvironment,
+            ...result,
+          });
+        }
+        const responseRecord = result.data && typeof result.data === "object"
+          ? result.data as Record<string, unknown>
+          : {};
+        const node = responseRecord.node ?? result.data;
+        return toolJson({
+          account: acct.name,
+          api_environment: apiEnvironment,
+          node,
+          mirror: getMirrorRelationship(node),
+        });
+      }
+
+      case "create_mirror": {
+        requireBetaMirrorApi();
+        const acct = await validateAccount(resolveAccount(args?.account as string | undefined));
+        const nodeId = args?.node_id as string;
+        const parentId = args?.parent_id as string;
+        const position = (args?.position as string | undefined) ?? "top";
+        if (!nodeId || !parentId) {
+          throw new Error("Missing required parameters: node_id and parent_id");
+        }
+        if (position !== "top" && position !== "bottom") {
+          throw new Error('position must be either "top" or "bottom"');
+        }
+        const result = await publicApiJsonRequest(
+          acct.apiKey,
+          `/nodes/${encodeURIComponent(nodeId)}/mirror`,
+          "POST",
+          { parent_id: parentId, position },
+        );
+        return toolJson({
+          account: acct.name,
+          api_environment: apiEnvironment,
+          ...result,
+          ...(result.ok
+            ? {
+                mirror: result.data,
+                note: "This is a synchronized view of the origin, not a copied subtree.",
+              }
+            : {}),
+        });
+      }
+
+      case "remove_mirror": {
+        requireBetaMirrorApi();
+        const acct = await validateAccount(resolveAccount(args?.account as string | undefined));
+        const nodeId = args?.node_id as string;
+        if (!nodeId) {
+          throw new Error("Missing required parameter: node_id");
+        }
+        if (args?.confirm !== true) {
+          throw new Error(
+            "Confirmation required. Set confirm=true to remove only this mirror root; its origin remains intact.",
+          );
+        }
+        const info = await publicApiJsonRequest(
+          acct.apiKey,
+          `/nodes/${encodeURIComponent(nodeId)}`,
+          "GET",
+        );
+        if (!info.ok) {
+          return toolJson({ error: true, operation: "remove_mirror", ...info });
+        }
+        const infoRecord = info.data && typeof info.data === "object"
+          ? info.data as Record<string, unknown>
+          : {};
+        const node = infoRecord.node ?? info.data;
+        const relationship = getMirrorRelationship(node);
+        if (relationship.role !== "mirror") {
+          throw new Error(
+            `Refusing to remove node ${nodeId}: the beta API does not identify it as a mirror root. The origin was not changed.`,
+          );
+        }
+        const result = await publicApiJsonRequest(
+          acct.apiKey,
+          `/nodes/${encodeURIComponent(nodeId)}/mirror`,
+          "DELETE",
+        );
+        return toolJson({
+          account: acct.name,
+          api_environment: apiEnvironment,
+          ...result,
+          removed_mirror_id: result.ok ? nodeId : null,
+          origin_id: relationship.origin_id,
+          origin_preserved: result.ok,
+        });
       }
 
       // Cache and search operations

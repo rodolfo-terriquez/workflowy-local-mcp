@@ -8,7 +8,8 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 
 ## Features
 
-- **11 tools** for managing Workflowy nodes, cache, and backups
+- **15 tools** for managing Workflowy nodes, mirrors, cache, and backups
+- **Production or beta public API** — production remains the default; beta unlocks early features such as mirror tools
 - **Local SQLite cache** with fast full-text search across all your nodes
 - **Daily full-account backups** stored locally as JSON snapshots
 - **Configurable backup retention** — optionally keep only the newest N backups
@@ -50,6 +51,9 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 | `delete_bookmark` | Delete a saved bookmark by name |
 | `read_doc` | Read a node and its children via the LLM Doc API. Supports calendar targets (`today`, `tomorrow`, `next_week`, `inbox`) and configurable depth (1-10). Returns tag-as-key JSON format. |
 | `edit_doc` | Edit nodes via the LLM Doc API. Supports `insert`, `update`, and `delete` operations in a single call. Can create nested structures with one request. |
+| `mirror_info` | Inspect whether a node is a mirror, an origin with mirrors, or a regular node (beta public API) |
+| `create_mirror` | Create a synchronized mirror under another parent (beta public API) |
+| `remove_mirror` | Remove one confirmed mirror root while preserving its origin (beta public API) |
 | `search_nodes` | Search locally cached nodes by text. Returns results with breadcrumb paths and a preview of each result's children. |
 | `sync_nodes` | Full sync of all Workflowy nodes to local cache (rate limited to 1 request per minute) |
 | `list_backups` | List stored full-account backup snapshots with IDs, timestamps, sizes, and file paths |
@@ -62,6 +66,8 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 The server uses Workflowy's LLM Doc API for reads and writes, with a local SQLite cache for search:
 
 - **LLM Doc API**: `read_doc` and `edit_doc` call Workflowy's `/api/llm/doc/read/` and `/api/llm/doc/edit` endpoints directly for real-time access
+- **Public API environments**: cache sync, backups, validation, and mirror tools can use production (default) or beta; select the environment under **Accounts** and restart your MCP client after saving
+- **Mirrors**: beta exposes synchronized mirror relationships through `data.mirror.origin_id` and `data.mirror.mirror_ids`; mirrors are views of one canonical origin, not copied subtrees
 - **Calendar targets**: Use `today`, `tomorrow`, `next_week`, or `inbox` as node IDs — the API handles date resolution automatically
 - **Batch operations**: `edit_doc` can perform multiple insert/update/delete operations in a single API call
 - **Local cache for search**: `search_nodes` uses a SQLite cache that auto-syncs when stale (>1 hour)
@@ -74,6 +80,7 @@ The server uses Workflowy's LLM Doc API for reads and writes, with a local SQLit
 The Tauri-based desktop app provides a UI for configuration and monitoring:
 
 - **API Key** — enter and validate your Workflowy API key
+- **API Environment** — keep the stable production default or opt into the beta public API for early features
 - **Tools** — customize server instructions and individual tool descriptions to tune AI behavior
 - **Setup** — copy-paste configuration snippets for Claude Code, Claude Desktop, and Cursor
 - **Bookmarks** — view, edit context, and delete saved bookmarks
@@ -123,9 +130,9 @@ All data is stored locally in the app data directory:
 | Windows | `%APPDATA%\com.workflowy.local-mcp\` |
 | Linux | `~/.local/share/com.workflowy.local-mcp/` |
 
-Files stored: `config.json` (settings), `bookmarks.db` (SQLite database with bookmarks and node cache), `mcp-logs.json` (server logs), `backups/` (daily full-account export snapshots plus metadata).
+Files stored: `config.json` (settings), `bookmarks.db` (SQLite database with bookmarks and node cache), `mcp-logs.json` (server logs), `backups/` (daily full-account export snapshots plus metadata). Bookmarks remain available in both environments; switching environments clears and refreshes only cached nodes. Beta backup snapshots are isolated in `beta/backups/` so they cannot replace production backups.
 
-The API key can also be set via the `WORKFLOWY_API_KEY` environment variable instead of the app config.
+The API key can also be set via the `WORKFLOWY_API_KEY` environment variable instead of the app config. Set `WORKFLOWY_API_ENVIRONMENT=beta` to override the saved public API environment for a server process.
 
 ## Works With
 

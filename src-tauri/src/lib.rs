@@ -33,10 +33,14 @@ fn copy_mcp_server(app: &tauri::App) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-async fn validate_api_key(api_key: String) -> Result<bool, String> {
+async fn validate_api_key(api_key: String, api_environment: Option<String>) -> Result<bool, String> {
+    let api_origin = match api_environment.as_deref() {
+        Some("beta") => "https://beta.workflowy.com",
+        _ => "https://workflowy.com",
+    };
     let client = reqwest::Client::new();
     let response = client
-        .get("https://workflowy.com/api/v1/targets")
+        .get(format!("{}/api/v1/targets", api_origin))
         .header("Authorization", format!("Bearer {}", api_key.trim()))
         .header("Content-Type", "application/json")
         .send()

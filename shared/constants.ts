@@ -46,6 +46,15 @@ The API returns tag-as-key JSON. Example:
 - \`+: 1\` means there are more children below the depth limit
 - Mirrors appear as \`{"<tag>": "Original Name", "m": "<original_short_id>", "c": [...]}\`: the \`m\` marker means this is a live mirror of another node, and the mirrored children are already included inline (no separate read needed)
 
+## Mirrors
+
+- A mirror is a synchronized view of one canonical origin node, not a copied subtree. Editing content through a mirror changes the shared origin content.
+- Do not duplicate mirrored content or treat a mirror and its origin as separate notes.
+- In \`read_doc\`, the compact \`m\` marker contains the origin's short ID and mirrored children are already inline.
+- In the public API, mirror relationships appear under \`data.mirror\`: \`origin_id\` identifies a mirror root; \`mirror_ids\` lists an origin's mirror roots. Location fields such as \`id\`, \`parent_id\`, and \`priority\` describe that specific view, while its content is shared.
+- Use \`mirror_info\` when identity matters. \`create_mirror\`, \`mirror_info\`, and \`remove_mirror\` currently require the beta public API environment.
+- \`remove_mirror\` removes only the specified mirror root and preserves its origin. Never substitute an origin ID when removing a mirror.
+
 ## edit_doc Operations
 
 **Insert** — Create new nodes:
@@ -274,6 +283,18 @@ Create nested structure:
 Create a table:
 \`edit_doc(root="inbox", operations=[{"op": "insert", "under": "inbox", "items": [{"n": "Scores", "l": "table", "c": [{"n": "Name", "c": [{"n": "Alice"}, {"n": "Bob"}]}, {"n": "Score", "c": [{"n": "95"}, {"n": "87"}]}]}], "position": "top"}])\``,
 
+  mirror_info: `Inspect a node's public API mirror relationship data. Returns whether the node is a mirror, an origin with mirrors, or a regular node, plus \`origin_id\` and \`mirror_ids\`.
+
+A mirror is a synchronized view, not a copy. Public API relationship fields are under \`data.mirror\`; these are distinct from the compact \`m\` marker returned by read_doc. This tool currently requires the beta public API environment.`,
+
+  create_mirror: `Create a synchronized mirror of a Workflowy node under another parent. This does not duplicate the subtree: edits through the new mirror affect the canonical origin content.
+
+Requires the beta public API environment, full source and destination node IDs, and an optional top/bottom position.`,
+
+  remove_mirror: `Remove one mirror root while preserving its canonical origin. This is destructive to that mirror location, so confirm must be true.
+
+The server verifies that node_id is a mirror root before removing it. Never pass an origin ID. Requires the beta public API environment.`,
+
   search_nodes:
     "Search Workflowy nodes by text in the local cache. Returns matches with their path, child preview, and timestamps (created_at, modified_at, completed_at). Use the node_id from results with read_doc to get full content.",
 
@@ -301,6 +322,9 @@ export const toolNames = [
   "delete_bookmark",
   "read_doc",
   "edit_doc",
+  "mirror_info",
+  "create_mirror",
+  "remove_mirror",
   "search_nodes",
   "sync_nodes",
   "list_backups",

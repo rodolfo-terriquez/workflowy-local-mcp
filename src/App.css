@@ -263,6 +263,23 @@ body {
     color: #555;
 }
 
+.api-environment-card {
+  margin-bottom: 20px;
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.api-environment-card select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  color: inherit;
+  background: #25253a;
+}
+
 .button {
     display: inline-flex;
     align-items: center;
