@@ -2,6 +2,8 @@
 
 A desktop app that gives AI assistants full read/write access to your Workflowy account with fast local search. Unlike simple API wrappers, it caches your entire outline in a local SQLite database with full-text search - so your AI can instantly search across hundreds of thousands of nodes without hitting API rate limits. Your API key never leaves your machine.
 
+More from this collection: [Workflowy tools by Rodolfo](https://madebyrodolfo.com/workflowy/).
+
 ### Why This Exists
 
 Workflowy's API has no search endpoint and a strict 1 request/minute rate limit on full exports. That makes direct API access painfully slow for AI assistants that need to explore your outline. This server solves that with local caching, instant full-text search, bookmarks with context, and AI-configurable instructions - all through a simple desktop app.
