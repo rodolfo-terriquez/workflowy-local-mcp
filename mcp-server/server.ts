@@ -14,8 +14,10 @@ import * as os from "os";
 import * as fs from "fs";
 import { defaultServerInstructions, toolDescriptions } from "../shared/constants.js";
 import {
-  normalizeAccountConfigs,
-  parseLegacyAccountConfig,
+  resolveAccountConfiguration,
+  type AccountConfigurationIssue,
+  type AccountConfigurationSource,
+  type ResolvedAccountConfiguration,
   type StoredAccountConfig,
 } from "../shared/accounts.js";
 import {
@@ -40,6 +42,7 @@ interface Config {
 }
 
 const DEFAULT_BACKUP_RETENTION_DAYS = 3;
+const SERVER_VERSION = "1.5.4";
 
 interface Account extends StoredAccountConfig {
   dataDir: string;
@@ -113,17 +116,26 @@ function getBackupsDir(account: Account): string {
 }
 
 // Load config from file
+function getConfigPath(): string {
+  return path.join(getDataDir(), "config.json");
+}
+
+let lastConfigReadError: string | null = null;
+
 function loadConfig(): Config {
-  const dataDir = getDataDir();
-  const configPath = path.join(dataDir, "config.json");
+  const configPath = getConfigPath();
 
   if (fs.existsSync(configPath)) {
     try {
-      return JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    } catch (e) {
-      // Ignore parse errors
+      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      lastConfigReadError = null;
+      return config;
+    } catch (error) {
+      lastConfigReadError = error instanceof Error ? error.message : String(error);
+      return {};
     }
   }
+  lastConfigReadError = null;
   return {};
 }
 
@@ -152,37 +164,137 @@ let SQL: initSqlJs.SqlJsStatic | null = null;
 let accounts: Account[] = [];
 let defaultAccountId: string | null = null;
 let apiEnvironment: WorkflowyApiEnvironment = DEFAULT_API_ENVIRONMENT;
+let loadedConfigurationSignature = "";
+let loadedConfigurationSource: AccountConfigurationSource = "none";
+let loadedConfigurationAt: string | null = null;
 
-function loadAccounts(): Account[] {
+function getConfigModifiedAt(): string | null {
+  try {
+    return fs.statSync(getConfigPath()).mtime.toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function resolveCurrentAccountConfiguration(): {
+  config: Config;
+  resolution: ResolvedAccountConfiguration;
+  resolvedApiEnvironment: WorkflowyApiEnvironment;
+  signature: string;
+} {
+  const config = loadConfig();
+  const resolution = resolveAccountConfiguration(
+    config,
+    process.env.WORKFLOWY_API_KEY || "",
+  );
+  if (lastConfigReadError) {
+    resolution.issues.push({
+      code: "CONFIG_ACCOUNTS_INVALID",
+      severity: "error",
+      message: `config.json could not be parsed: ${lastConfigReadError}`,
+      resolution: "Correct config.json or save the Accounts settings again in Workflowy MCP.",
+    });
+  }
+  const resolvedApiEnvironment = resolveApiEnvironment(
+    config.apiEnvironment,
+    process.env.WORKFLOWY_API_ENVIRONMENT,
+  );
+  const signature = JSON.stringify({
+    source: resolution.source,
+    accounts: resolution.accounts,
+    defaultAccountId: resolution.defaultAccountId,
+    apiEnvironment: resolvedApiEnvironment,
+  });
+
+  return { config, resolution, resolvedApiEnvironment, signature };
+}
+
+function reloadAccountConfiguration(force = false): {
+  changed: boolean;
+  previousAccountCount: number;
+  accountCount: number;
+} {
   const baseDir = getDataDir();
-  const envValue = process.env.WORKFLOWY_API_KEY || "";
-  const parsed = envValue.trim()
-    ? {
-        accounts: parseLegacyAccountConfig(envValue),
-        defaultAccountId: "default",
-      }
-    : normalizeAccountConfigs(loadConfig());
+  const { resolution, resolvedApiEnvironment, signature } =
+    resolveCurrentAccountConfiguration();
+  const previousAccountCount = accounts.length;
+  const changed = signature !== loadedConfigurationSignature;
 
-  defaultAccountId = parsed.defaultAccountId;
-  const loadedAccounts = parsed.accounts.map((account) => ({
-    ...account,
-    dataDir: account.id === "default" ? baseDir : path.join(baseDir, account.id),
-    db: null,
-  }));
+  if (!force && !changed) {
+    return { changed: false, previousAccountCount, accountCount: accounts.length };
+  }
 
-  if (loadedAccounts.length > 0) {
-    const summary = loadedAccounts
+  const existingAccounts = new Map(accounts.map((account) => [account.id, account]));
+  accounts = resolution.accounts.map((account) => {
+    const existing = existingAccounts.get(account.id);
+    return {
+      ...account,
+      dataDir: account.id === "default" ? baseDir : path.join(baseDir, account.id),
+      db:
+        existing && existing.apiKey === account.apiKey
+          ? existing.db
+          : null,
+    };
+  });
+  defaultAccountId = resolution.defaultAccountId;
+  apiEnvironment = resolvedApiEnvironment;
+  loadedConfigurationSignature = signature;
+  loadedConfigurationSource = resolution.source;
+  loadedConfigurationAt = new Date().toISOString();
+
+  if (accounts.length > 0) {
+    const summary = accounts
       .map((account) => `"${account.name}"${account.id === defaultAccountId ? " (default)" : ""}`)
       .join(", ");
     writeMcpLog(
-      `Configured Workflowy accounts: ${summary}; public API environment: ${apiEnvironment}`,
+      `${changed && previousAccountCount > 0 ? "Reloaded" : "Configured"} Workflowy accounts from ${resolution.source}: ${summary}; public API environment: ${apiEnvironment}`,
       "info",
     );
   } else {
     writeMcpLog("No Workflowy accounts configured", "warning");
   }
 
-  return loadedAccounts;
+  for (const issue of resolution.issues) {
+    writeMcpLog(`[${issue.code}] ${issue.message} ${issue.resolution}`, issue.severity);
+  }
+
+  return { changed, previousAccountCount, accountCount: accounts.length };
+}
+
+function getConfigurationDiagnostics() {
+  const current = resolveCurrentAccountConfiguration();
+  const issues: AccountConfigurationIssue[] = [...current.resolution.issues];
+  const configChangedSinceLastReload =
+    current.signature !== loadedConfigurationSignature;
+
+  if (configChangedSinceLastReload) {
+    issues.push({
+      code: "CONFIG_CHANGED_SINCE_RELOAD",
+      severity: "warning",
+      message: "The account configuration changed after the MCP server last loaded it.",
+      resolution: "Call reload_configuration or refresh the MCP tool list.",
+    });
+  }
+
+  return {
+    configuration_source: loadedConfigurationSource,
+    config_path: getConfigPath(),
+    config_modified_at: getConfigModifiedAt(),
+    configuration_loaded_at: loadedConfigurationAt,
+    loaded_account_count: accounts.length,
+    raw_config_file_account_count:
+      current.resolution.rawConfigFileAccountCount,
+    config_file_account_count: current.resolution.configFileAccountCount,
+    environment_variable_present:
+      current.resolution.environmentVariablePresent,
+    environment_account_count: current.resolution.environmentAccountCount,
+    environment_override_active:
+      current.resolution.environmentOverrideActive,
+    config_changed_since_last_reload: configChangedSinceLastReload,
+    hot_reload_supported: true,
+    server_version: SERVER_VERSION,
+    issues,
+  };
 }
 
 function getDefaultAccount(): Account {
@@ -2000,11 +2112,13 @@ const accountSchemaProperty = {
 
 function getAccountSchemaProperty() {
   const accountNames = accounts.map((account) => account.name);
-  const defaultAccount = getDefaultAccount();
+  const defaultAccount = accounts.length > 0 ? getDefaultAccount() : null;
   const description =
     accountNames.length > 1
-      ? `Account name to use. Available accounts: ${accountNames.map((name) => `"${name}"`).join(", ")}. Defaults to "${defaultAccount.name}". Use this parameter whenever the user asks about a specific account.`
-      : `Account name to use. Defaults to "${defaultAccount.name}".`;
+      ? `Account name to use. Available accounts: ${accountNames.map((name) => `"${name}"`).join(", ")}. Defaults to "${defaultAccount!.name}". Use this parameter whenever the user asks about a specific account.`
+      : defaultAccount
+        ? `Account name to use. Defaults to "${defaultAccount.name}".`
+        : "Account name to use. No valid Workflowy accounts are currently loaded; call list_accounts for diagnostics.";
 
   return {
     account: {
@@ -2020,6 +2134,11 @@ const defaultTools = [
   {
     name: "list_accounts",
     description: toolDescriptions.list_accounts,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "reload_configuration",
+    description: toolDescriptions.reload_configuration,
     inputSchema: { type: "object", properties: {} },
   },
   // This tool MUST be first - it's the entry point for every conversation
@@ -2324,9 +2443,10 @@ function getTools() {
   const config = loadConfig();
   const customDescriptions = config.toolDescriptions || {};
   const dynamicAccountProperty = getAccountSchemaProperty().account;
+  const accountlessTools = new Set(["list_accounts", "reload_configuration"]);
 
   return defaultTools.map((tool) => {
-    const inputSchema = tool.name === "list_accounts"
+    const inputSchema = accountlessTools.has(tool.name)
       ? tool.inputSchema
       : {
           ...tool.inputSchema,
@@ -2350,14 +2470,17 @@ function getTools() {
 function getServerInstructions(db: Database | null): string {
   const config = loadConfig();
   const baseInstructions = config.serverDescription || defaultServerInstructions;
-  const defaultAccount = getDefaultAccount();
+  const defaultAccount = accounts.length > 0 ? getDefaultAccount() : null;
   let instructions = baseInstructions;
 
-  if (accounts.length > 0) {
+  if (accounts.length > 0 && defaultAccount) {
     const accountLines = accounts
       .map((account) => `- "${account.name}"${account.id === defaultAccount.id ? " (default)" : ""}`)
       .join("\n");
     instructions += `\n\n## Connected Accounts\n${accountLines}\nUse the \`account\` parameter on Workflowy tools to target a specific account. Defaults to "${defaultAccount.name}". These exact account names are also listed in tool schemas.`;
+  } else {
+    instructions +=
+      "\n\n## Account Configuration Required\nNo valid Workflowy accounts are loaded. Call `list_accounts`, follow the sanitized `configuration.issues` resolutions, then call `reload_configuration`.";
   }
   instructions += `\n\n## Public API Environment\nThe public Workflowy API is currently set to **${apiEnvironment}** (${getPublicApiBaseUrl(apiEnvironment)}). This setting controls cache sync, backups, validation, and mirror tools. The separate LLM Doc API used by read_doc and edit_doc is unchanged.`;
   
@@ -2379,23 +2502,17 @@ ${userInstructions}`;
 
 // Main server setup
 async function main() {
-  const config = loadConfig();
-  apiEnvironment = resolveApiEnvironment(
-    config.apiEnvironment,
-    process.env.WORKFLOWY_API_ENVIRONMENT,
-  );
-  accounts = loadAccounts();
-  if (accounts.length === 0) {
-    throw new Error("No Workflowy accounts configured.");
-  }
-
-  const defaultAccount = getDefaultAccount();
+  reloadAccountConfiguration(true);
+  const defaultAccount = accounts.length > 0 ? getDefaultAccount() : null;
   // Initialize DB early so we can load user's custom instructions for the server
-  const db = await getDbForAccount(defaultAccount);
+  const db = defaultAccount ? await getDbForAccount(defaultAccount) : null;
   
   // Try to sync ai_instructions bookmark children before loading instructions
   // This ensures we have fresh data at startup
   try {
+    if (!defaultAccount || !db) {
+      throw new Error("No valid Workflowy account is available for startup sync.");
+    }
     await validateAccount(defaultAccount);
     const bookmarkResult = db.exec(
       "SELECT node_id FROM bookmarks WHERE name = ?",
@@ -2415,49 +2532,58 @@ async function main() {
   const server = new Server(
     {
       name: "workflowy-mcp",
-      version: "1.5.3",
+      version: SERVER_VERSION,
     },
     {
       capabilities: {
-        tools: {},
+        tools: { listChanged: true },
         prompts: {},
       },
       instructions: serverInstructions,
     },
   );
 
-  // List tools handler - reload config each time to pick up changes
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: getTools(),
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    reloadAccountConfiguration();
+    return { tools: getTools() };
+  });
 
   // List prompts handler - exposes server instructions as a prompt
-  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
-    prompts: [
-      {
-        name: "server_instructions",
-        description:
-          "Get the current server instructions and context for working with Workflowy",
-      },
-    ],
-  }));
+  server.setRequestHandler(ListPromptsRequestSchema, async () => {
+    reloadAccountConfiguration();
+    return {
+      prompts: [
+        {
+          name: "server_instructions",
+          description:
+            "Get the current server instructions and context for working with Workflowy",
+        },
+      ],
+    };
+  });
 
   // Get prompt handler - returns dynamic server instructions
   server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    const reloadResult = reloadAccountConfiguration();
+    if (reloadResult.changed) {
+      await server.sendToolListChanged();
+    }
     const { name } = request.params;
 
     if (name === "server_instructions") {
       // Get db to load user's custom AI instructions
-      const defaultAccount = getDefaultAccount();
-      const db = await getDbForAccount(defaultAccount);
+      const defaultAccount = accounts.length > 0 ? getDefaultAccount() : null;
+      const db = defaultAccount ? await getDbForAccount(defaultAccount) : null;
       
       // Auto-sync at the start of each conversation (if cache is stale)
-      try {
-        await validateAccount(defaultAccount);
-        await ensureCacheFresh(defaultAccount);
-      } catch (e) {
-        // Ignore sync errors - instructions can still be returned
-        writeMcpLog(`Auto-sync on conversation start failed: ${e}`, "warning");
+      if (defaultAccount) {
+        try {
+          await validateAccount(defaultAccount);
+          await ensureCacheFresh(defaultAccount);
+        } catch (e) {
+          // Ignore sync errors - instructions can still be returned
+          writeMcpLog(`Auto-sync on conversation start failed: ${e}`, "warning");
+        }
       }
       
       return {
@@ -2480,10 +2606,16 @@ async function main() {
   // Call tool handler
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    if (name !== "reload_configuration") {
+      const reloadResult = reloadAccountConfiguration();
+      if (reloadResult.changed) {
+        await server.sendToolListChanged();
+      }
+    }
 
     switch (name) {
       case "list_accounts": {
-        const defaultAccount = getDefaultAccount();
+        const defaultAccount = accounts.length > 0 ? getDefaultAccount() : null;
         return {
           content: [
             {
@@ -2493,16 +2625,51 @@ async function main() {
                   accounts: accounts.map((account) => ({
                     name: account.name,
                     id: account.id,
-                    is_default: account.id === defaultAccount.id,
+                    is_default: account.id === defaultAccount?.id,
                   })),
-                  default_account: defaultAccount.name,
+                  default_account: defaultAccount?.name ?? null,
                   account_count: accounts.length,
                   api_environment: apiEnvironment,
                   public_api_base_url: getPublicApiBaseUrl(apiEnvironment),
+                  configuration: getConfigurationDiagnostics(),
                   account_usage:
                     accounts.length > 1
                       ? `Use the account parameter with one of these exact names: ${accounts.map((account) => `"${account.name}"`).join(", ")}. These names are already available in server instructions and tool schemas.`
                       : "Only one Workflowy account is configured.",
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
+      case "reload_configuration": {
+        const before = accounts.map((account) => account.name);
+        const result = reloadAccountConfiguration(true);
+        const after = accounts.map((account) => account.name);
+        if (result.changed || JSON.stringify(before) !== JSON.stringify(after)) {
+          await server.sendToolListChanged();
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: accounts.length > 0,
+                  changed:
+                    result.changed || JSON.stringify(before) !== JSON.stringify(after),
+                  previous_accounts: before,
+                  accounts: after,
+                  default_account:
+                    accounts.length > 0 ? getDefaultAccount().name : null,
+                  configuration: getConfigurationDiagnostics(),
+                  next_step:
+                    accounts.length > 0
+                      ? "Refresh the MCP tool list so account enums reflect the reloaded configuration."
+                      : "Correct the issues reported in configuration diagnostics, then call reload_configuration again.",
                 },
                 null,
                 2,

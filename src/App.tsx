@@ -4,6 +4,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import "./App.css";
 import { defaultServerInstructions, defaultTools } from "../shared/constants";
 import {
+  createAccountDraft,
   normalizeAccountConfigs,
   uniqueAccountSlug,
   isValidAccountName,
@@ -315,8 +316,6 @@ function App() {
 
   // Cache state
   const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [syncCooldown, setSyncCooldown] = useState(0);
   const [backups, setBackups] = useState<BackupSnapshot[]>([]);
   const [backupsLoading, setBackupsLoading] = useState(false);
   const [backupDirectory, setBackupDirectory] = useState("");
@@ -388,14 +387,6 @@ function App() {
       console.log("Could not get app version:", e);
     }
   };
-
-  // Countdown timer for sync cooldown
-  useEffect(() => {
-    if (syncCooldown > 0) {
-      const timer = setTimeout(() => setSyncCooldown(syncCooldown - 1), 1000);
-      return () => clearTimeout(timer);
-    }
-  }, [syncCooldown]);
 
   // Load cache status when cache section is active
   useEffect(() => {
@@ -639,75 +630,6 @@ function App() {
     }
   };
 
-  const syncNow = async () => {
-    if (!selectedApiKey || isSyncing) return;
-
-    setIsSyncing(true);
-    addLog("Starting node sync...", "info");
-
-    try {
-      const { fetch } = await import("@tauri-apps/plugin-http");
-      const response = await fetch(
-        getPublicApiUrl(apiEnvironment, "/nodes-export"),
-        {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${selectedApiKey}`,
-            "Content-Type": "application/json",
-          },
-        },
-      );
-
-      const data = await response.json();
-      
-      // Check for rate limit error
-      if (data.error) {
-        const retryAfter = data.retry_after || 60;
-        addLog(`API rate limited. Retry after ${retryAfter} seconds.`, "error");
-        showToast(`Rate limited. Wait ${retryAfter}s and try again.`, "error");
-        setSyncCooldown(retryAfter);
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
-      }
-
-      // API returns { nodes: [...] }, not just an array
-      const nodes = data.nodes || [];
-      const nodeCount = Array.isArray(nodes) ? nodes.length : 0;
-
-      addLog(`Sync complete: ${nodeCount} nodes fetched`, "success");
-      showToast(`Synced ${nodeCount} nodes successfully`, "success");
-
-      // Update status
-      setCacheStatus({
-        cache_populated: true,
-        node_count: nodeCount,
-        last_sync: new Date().toISOString(),
-        hours_since_sync: 0,
-        is_stale: false,
-        can_sync_now: false,
-        sync_cooldown_seconds: 60,
-      });
-
-      // Start cooldown
-      setSyncCooldown(60);
-
-      // Note: The actual database update happens via the MCP server
-      // This UI sync just fetches and displays info - the MCP server handles persistence
-      showToast(
-        "Nodes fetched! Use sync_nodes via MCP for persistent cache.",
-        "success",
-      );
-    } catch (e) {
-      addLog(`Sync failed: ${e}`, "error");
-      showToast("Sync failed. Check logs for details.", "error");
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
   const loadConfig = async () => {
     try {
       const dataDir = await getDataDir();
@@ -778,13 +700,8 @@ function App() {
   };
 
   const getDataDir = async (): Promise<string> => {
-    try {
-      const { appDataDir } = await import("@tauri-apps/api/path");
-      return await appDataDir();
-    } catch (e) {
-      console.error("Failed to get data dir", e);
-      return "";
-    }
+    const { appDataDir } = await import("@tauri-apps/api/path");
+    return appDataDir();
   };
 
   const getAccountDataDir = async (accountId: string): Promise<string> => {
@@ -797,21 +714,29 @@ function App() {
   };
 
   const saveConfig = async (config: AppConfig) => {
-    try {
-      const { writeTextFile, mkdir, exists } = await import(
-        "@tauri-apps/plugin-fs"
-      );
-      const dataDir = await getDataDir();
-      const configPath = dataDir + "/config.json";
-
-      if (!(await exists(dataDir))) {
-        await mkdir(dataDir, { recursive: true });
-      }
-
-      await writeTextFile(configPath, JSON.stringify(config, null, 2));
-    } catch (e) {
-      console.error("Failed to save config", e);
+    const { writeTextFile, readTextFile, mkdir, exists } = await import(
+      "@tauri-apps/plugin-fs"
+    );
+    const dataDir = await getDataDir();
+    if (!dataDir) {
+      throw new Error("The application data directory could not be resolved.");
     }
+    const configPath = dataDir + "/config.json";
+
+    if (!(await exists(dataDir))) {
+      await mkdir(dataDir, { recursive: true });
+    }
+
+    const serializedConfig = JSON.stringify(config, null, 2);
+    await writeTextFile(configPath, serializedConfig);
+
+    const persistedContent = await readTextFile(configPath);
+    const persistedConfig = JSON.parse(persistedContent) as AppConfig;
+    if (JSON.stringify(persistedConfig) !== JSON.stringify(config)) {
+      throw new Error(`Saved configuration verification failed at ${configPath}.`);
+    }
+
+    return configPath;
   };
 
   const getFilteredToolDescriptions = (): Record<string, string> => {
@@ -943,19 +868,31 @@ function App() {
     return null;
   };
 
+  const getErrorMessage = (error: unknown): string =>
+    error instanceof Error ? error.message : String(error);
+
+  const validateAccountsWithApi = async (nextAccounts: WorkflowyAccount[]) => {
+    for (const account of nextAccounts) {
+      try {
+        await invoke("validate_api_key", {
+          apiKey: account.apiKey,
+          apiEnvironment,
+        });
+      } catch (error) {
+        throw new Error(
+          `API key validation failed for \"${account.name}\": ${getErrorMessage(error)}`,
+        );
+      }
+    }
+  };
+
   const addAccount = () => {
-    const nextNumber = accounts.length + 1;
-    const name = `Account ${nextNumber}`;
-    const usedIds = new Set(accounts.map((account) => account.id));
-    const id =
-      accounts.length === 0
-        ? "default"
-        : uniqueAccountSlug(name, nextNumber, usedIds);
-    const nextAccounts = [...accounts, { id, name, apiKey: "" }];
+    const account = createAccountDraft(accounts);
+    const nextAccounts = [...accounts, account];
     setAccounts(nextAccounts);
     if (nextAccounts.length === 1) {
-      setDefaultAccountId(id);
-      setSelectedAccountId(id);
+      setDefaultAccountId(account.id);
+      setSelectedAccountId(account.id);
     }
   };
 
@@ -995,18 +932,13 @@ function App() {
 
     try {
       addLog("Validating Workflowy accounts...", "info");
-      for (const account of normalizedAccounts) {
-        await invoke("validate_api_key", {
-          apiKey: account.apiKey,
-          apiEnvironment,
-        });
-      }
+      await validateAccountsWithApi(normalizedAccounts);
 
       const nextDefaultId =
         normalizedAccounts.some((account) => account.id === defaultAccountId)
           ? defaultAccountId
           : normalizedAccounts[0].id;
-      await saveConfig(
+      const configPath = await saveConfig(
         buildConfig({
           accounts: normalizedAccounts,
           defaultAccountId: nextDefaultId,
@@ -1024,11 +956,17 @@ function App() {
         normalizedAccounts.find((account) => account.id === nextDefaultId)?.apiKey ??
           normalizedAccounts[0].apiKey,
       );
-      addLog("Workflowy accounts validated and saved", "success");
-      showToast("Accounts saved successfully", "success");
+      addLog(
+        `${normalizedAccounts.length} Workflowy accounts verified and saved to ${configPath}`,
+        "success",
+      );
+      showToast(
+        `${normalizedAccounts.length} accounts saved and verified. MCP tools reload automatically.`,
+        "success",
+      );
     } catch (e) {
       addLog(`Failed to save accounts: ${e}`, "error");
-      showToast("One or more API keys are invalid", "error");
+      showToast(getErrorMessage(e), "error");
     }
   };
 
@@ -1307,15 +1245,7 @@ function App() {
   };
 
   const addOnboardingAccount = () => {
-    const nextNumber = onboardingAccounts.length + 1;
-    setOnboardingAccounts((prev) => [
-      ...prev,
-      {
-        id: `account_${nextNumber}`,
-        name: `Account ${nextNumber}`,
-        apiKey: "",
-      },
-    ]);
+    setOnboardingAccounts((prev) => [...prev, createAccountDraft(prev)]);
     setValidationError("");
   };
 
@@ -1357,12 +1287,7 @@ function App() {
     setIsValidating(true);
     setValidationError("");
     try {
-      for (const account of nextAccounts) {
-        await invoke("validate_api_key", {
-          apiKey: account.apiKey,
-          apiEnvironment,
-        });
-      }
+      await validateAccountsWithApi(nextAccounts);
       await saveConfig(
         buildConfig({
           accounts: nextAccounts,
@@ -1380,8 +1305,8 @@ function App() {
           : `${nextAccounts.length} Workflowy accounts validated and saved`,
         "success",
       );
-    } catch {
-      setValidationError("One or more API keys are invalid. Please check and try again.");
+    } catch (error) {
+      setValidationError(getErrorMessage(error));
     } finally {
       setIsValidating(false);
     }
@@ -2381,17 +2306,6 @@ function App() {
 
                   <div className="cache-actions">
                     <button
-                      className={`button button-primary ${isSyncing || syncCooldown > 0 ? "button-disabled" : ""}`}
-                      onClick={syncNow}
-                      disabled={isSyncing || syncCooldown > 0}
-                    >
-                      {isSyncing
-                        ? "Syncing..."
-                        : syncCooldown > 0
-                          ? `Wait ${syncCooldown}s`
-                          : "Sync Now"}
-                    </button>
-                    <button
                       className="button button-secondary"
                       onClick={() => {
                         void loadCacheStatus();
@@ -2404,10 +2318,10 @@ function App() {
 
                   <div className="info-box">
                     <p>
-                      <strong>Note:</strong> The cache is managed by the MCP
-                      server. Use the <code>sync_nodes</code> tool via your MCP
-                      client for persistent syncing, or use the{" "}
-                      <code>search_nodes</code> tool to search cached content.
+                      <strong>Sync from your AI app:</strong> Ask your MCP client
+                      to call <code>sync_nodes</code> for the selected account.
+                      The MCP server writes the persistent cache and creates its
+                      daily backup; this desktop screen only reports local status.
                     </p>
                     <p style={{ marginTop: "8px" }}>
                       <strong>Rate Limit:</strong> The Workflowy API limits

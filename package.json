@@ -1,15 +1,16 @@
 {
   "name": "workflowy-local-mcp",
   "private": true,
-  "version": "1.5.3",
+  "version": "1.5.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "build:mcp": "esbuild mcp-server/server.ts --bundle --platform=node --target=node18 --outfile=dist-mcp/server.cjs --format=cjs",
-    "test": "npm run test:accounts && npm run test:api-environment",
+    "test": "npm run test:accounts && npm run test:api-environment && npm run test:mcp-hot-reload",
     "test:accounts": "node -e \"require('node:fs').mkdirSync('.tmp', { recursive: true })\" && esbuild tests/accounts.test.ts --bundle --platform=node --target=node20 --outfile=.tmp/accounts.test.cjs --format=cjs && node --test .tmp/accounts.test.cjs",
     "test:api-environment": "node -e \"require('node:fs').mkdirSync('.tmp', { recursive: true })\" && esbuild tests/api-environment.test.ts --bundle --platform=node --target=node20 --outfile=.tmp/api-environment.test.cjs --format=cjs && node --test .tmp/api-environment.test.cjs",
+    "test:mcp-hot-reload": "npm run build:mcp && node --test tests/mcp-hot-reload.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "mcp-server": "node dist-mcp/server.cjs"

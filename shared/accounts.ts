@@ -10,6 +10,39 @@ export interface AppConfigWithAccounts {
   defaultAccountId?: string;
 }
 
+export type AccountConfigurationSource =
+  | "config_file"
+  | "environment_variable"
+  | "none";
+
+export interface AccountConfigurationIssue {
+  code:
+    | "CONFIG_ACCOUNT_MISSING_NAME"
+    | "CONFIG_ACCOUNT_MISSING_API_KEY"
+    | "CONFIG_ACCOUNTS_INVALID"
+    | "CONFIG_CHANGED_SINCE_RELOAD"
+    | "ENVIRONMENT_ACCOUNTS_INVALID"
+    | "ENVIRONMENT_VARIABLE_IGNORED"
+    | "NO_VALID_ACCOUNTS";
+  severity: "warning" | "error";
+  message: string;
+  resolution: string;
+  accountIndex?: number;
+  accountName?: string;
+}
+
+export interface ResolvedAccountConfiguration {
+  accounts: StoredAccountConfig[];
+  defaultAccountId: string | null;
+  source: AccountConfigurationSource;
+  rawConfigFileAccountCount: number;
+  configFileAccountCount: number;
+  environmentVariablePresent: boolean;
+  environmentAccountCount: number;
+  environmentOverrideActive: boolean;
+  issues: AccountConfigurationIssue[];
+}
+
 const ACCOUNT_ENTRY_SEPARATOR = /[\n;,]/;
 const HEX_KEY_PREFIX = /^[0-9a-f-]+$/i;
 const ACCOUNT_LABEL = /^[A-Za-z0-9][A-Za-z0-9 .@_+-]{0,29}$/;
@@ -90,6 +123,29 @@ export function uniqueAccountSlug(
   const fallbackSlug = `${baseSlug}_${suffix}`;
   usedSlugs.add(fallbackSlug);
   return fallbackSlug;
+}
+
+export function createAccountDraft(
+  existingAccounts: StoredAccountConfig[],
+): StoredAccountConfig {
+  const usedIds = new Set(existingAccounts.map((account) => account.id));
+  const usedNames = new Set(
+    existingAccounts.map((account) => account.name.trim().toLowerCase()),
+  );
+  let accountNumber = existingAccounts.length + 1;
+  let name = `Account ${accountNumber}`;
+
+  while (usedNames.has(name.toLowerCase())) {
+    accountNumber += 1;
+    name = `Account ${accountNumber}`;
+  }
+
+  const id =
+    existingAccounts.length === 0 && !usedIds.has("default")
+      ? "default"
+      : uniqueAccountSlug(name, accountNumber, usedIds);
+
+  return { id, name, apiKey: "" };
 }
 
 export function parseLegacyAccountConfig(rawValue: string): StoredAccountConfig[] {
@@ -186,4 +242,152 @@ export function normalizeAccountConfigs(config: AppConfigWithAccounts): {
   }
 
   return { accounts: [], defaultAccountId: null };
+}
+
+export function resolveAccountConfiguration(
+  config: AppConfigWithAccounts,
+  environmentValue = "",
+): ResolvedAccountConfiguration {
+  const issues: AccountConfigurationIssue[] = [];
+  const rawAccountsValue = (config as { accounts?: unknown }).accounts;
+  const rawAccounts = Array.isArray(rawAccountsValue) ? rawAccountsValue : [];
+
+  if (rawAccountsValue !== undefined && !Array.isArray(rawAccountsValue)) {
+    issues.push({
+      code: "CONFIG_ACCOUNTS_INVALID",
+      severity: "error",
+      message: "The accounts field in config.json is not an array.",
+      resolution:
+        "Open Workflowy MCP Accounts settings and save again to replace the malformed configuration.",
+    });
+  }
+
+  rawAccounts.forEach((account, index) => {
+    const name = String(account.name ?? "").trim();
+    const apiKey = String(account.apiKey ?? "").trim();
+    if (!name) {
+      issues.push({
+        code: "CONFIG_ACCOUNT_MISSING_NAME",
+        severity: "error",
+        message: `Account entry ${index + 1} in config.json has no nickname.`,
+        resolution: "Add a unique account nickname in the Workflowy MCP Accounts settings.",
+        accountIndex: index,
+      });
+    }
+    if (!apiKey) {
+      issues.push({
+        code: "CONFIG_ACCOUNT_MISSING_API_KEY",
+        severity: "error",
+        message: name
+          ? `Account \"${name}\" in config.json has no API key.`
+          : `Account entry ${index + 1} in config.json has no API key.`,
+        resolution: "Add the account API key in the Workflowy MCP Accounts settings and save again.",
+        accountIndex: index,
+        ...(name ? { accountName: name } : {}),
+      });
+    }
+  });
+
+  let fileAccounts: StoredAccountConfig[] = [];
+  let fileDefaultAccountId: string | null = null;
+  try {
+    const normalized = normalizeAccountConfigs(config);
+    fileAccounts = normalized.accounts;
+    fileDefaultAccountId = normalized.defaultAccountId;
+  } catch (error) {
+    issues.push({
+      code: "CONFIG_ACCOUNTS_INVALID",
+      severity: "error",
+      message: `The accounts in config.json are invalid: ${error instanceof Error ? error.message : String(error)}`,
+      resolution: "Correct the account nicknames and IDs in Workflowy MCP, then save the Accounts settings again.",
+    });
+  }
+
+  const trimmedEnvironmentValue = environmentValue.trim();
+  let environmentAccounts: StoredAccountConfig[] = [];
+  if (trimmedEnvironmentValue) {
+    try {
+      environmentAccounts = parseLegacyAccountConfig(trimmedEnvironmentValue);
+    } catch (error) {
+      issues.push({
+        code: "ENVIRONMENT_ACCOUNTS_INVALID",
+        severity: "error",
+        message: `WORKFLOWY_API_KEY could not be parsed: ${error instanceof Error ? error.message : String(error)}`,
+        resolution: "Remove WORKFLOWY_API_KEY from the MCP launch configuration or correct its labeled account entries.",
+      });
+    }
+  }
+
+  const hasStructuredFileAccounts = rawAccounts.length > 0 && fileAccounts.length > 0;
+  if (hasStructuredFileAccounts) {
+    if (trimmedEnvironmentValue) {
+      issues.push({
+        code: "ENVIRONMENT_VARIABLE_IGNORED",
+        severity: "warning",
+        message:
+          "WORKFLOWY_API_KEY is defined, but structured accounts from config.json take precedence.",
+        resolution:
+          "Remove WORKFLOWY_API_KEY from the MCP launch configuration to avoid ambiguous account settings.",
+      });
+    }
+    return {
+      accounts: fileAccounts,
+      defaultAccountId: fileDefaultAccountId,
+      source: "config_file",
+      rawConfigFileAccountCount: rawAccounts.length,
+      configFileAccountCount: fileAccounts.length,
+      environmentVariablePresent: Boolean(trimmedEnvironmentValue),
+      environmentAccountCount: environmentAccounts.length,
+      environmentOverrideActive: false,
+      issues,
+    };
+  }
+
+  if (environmentAccounts.length > 0) {
+    return {
+      accounts: environmentAccounts,
+      defaultAccountId: environmentAccounts[0]?.id ?? null,
+      source: "environment_variable",
+      rawConfigFileAccountCount: rawAccounts.length,
+      configFileAccountCount: fileAccounts.length,
+      environmentVariablePresent: true,
+      environmentAccountCount: environmentAccounts.length,
+      environmentOverrideActive: true,
+      issues,
+    };
+  }
+
+  if (fileAccounts.length > 0) {
+    return {
+      accounts: fileAccounts,
+      defaultAccountId: fileDefaultAccountId,
+      source: "config_file",
+      rawConfigFileAccountCount: rawAccounts.length,
+      configFileAccountCount: fileAccounts.length,
+      environmentVariablePresent: Boolean(trimmedEnvironmentValue),
+      environmentAccountCount: environmentAccounts.length,
+      environmentOverrideActive: false,
+      issues,
+    };
+  }
+
+  issues.push({
+    code: "NO_VALID_ACCOUNTS",
+    severity: "error",
+    message: "No valid Workflowy accounts were found in config.json or WORKFLOWY_API_KEY.",
+    resolution:
+      "Add and save an account in Workflowy MCP, then call reload_configuration.",
+  });
+
+  return {
+    accounts: [],
+    defaultAccountId: null,
+    source: "none",
+    rawConfigFileAccountCount: rawAccounts.length,
+    configFileAccountCount: 0,
+    environmentVariablePresent: Boolean(trimmedEnvironmentValue),
+    environmentAccountCount: environmentAccounts.length,
+    environmentOverrideActive: false,
+    issues,
+  };
 }

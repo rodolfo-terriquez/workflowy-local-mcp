@@ -15,6 +15,8 @@ export const defaultServerInstructions = `This MCP server connects to a user's W
 
 4. **Workflowy links** — If user shares a link like \`https://beta.workflowy.com/#/b24b650a6b91\`, extract the 12-hex ID after \`#/\` and use that as \`node_id\`.
 
+5. **Missing account** — Call \`list_accounts\` and inspect its \`configuration.issues\`. If configuration changed after startup, call \`reload_configuration\`, refresh the MCP tool list, and retry with the exact account nickname. Never ask the user to expose an API key.
+
 ## Key Concepts
 - Nodes are identified by 12-character hex tags (e.g., "b605f0e85a4a")
 - Nodes can have: name (text), note/description (d), type (h1/h2/h3/todo/bullets/code/quote/table/p), completion status (x: 1 or 0)
@@ -193,7 +195,10 @@ search_nodes searches the local cache by text. Use it when you don't know where 
 export const toolDescriptions = {
   list_accounts: `List the Workflowy accounts configured in this MCP server.
 
-The server instructions and tool schemas already include available account names when multiple accounts are configured. Use this tool when you need to verify connected accounts, identify the default account, or answer a user question about configured accounts.`,
+The response includes sanitized configuration diagnostics, including whether config.json and the loaded server state disagree or an environment variable is affecting account selection. Use this tool when you need to verify connected accounts, identify the default account, or diagnose a missing account.`,
+
+  reload_configuration:
+    "Reload Workflowy accounts and API environment from config.json, refresh account diagnostics, and report what changed. This never returns API keys.",
 
   list_bookmarks: `**START EVERY CONVERSATION BY CALLING THIS TOOL.** Returns saved Workflowy locations AND the user's custom AI instructions.
 
@@ -317,6 +322,7 @@ The server verifies that node_id is a mirror root before removing it. Never pass
 // Tool names in the order they should appear
 export const toolNames = [
   "list_accounts",
+  "reload_configuration",
   "list_bookmarks",
   "save_bookmark",
   "delete_bookmark",

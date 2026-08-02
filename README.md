@@ -8,7 +8,7 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 
 ## Features
 
-- **15 tools** for managing Workflowy nodes, mirrors, cache, and backups
+- **16 tools** for managing Workflowy nodes, mirrors, accounts, cache, and backups
 - **Production or beta public API** — production remains the default; beta unlocks early features such as mirror tools
 - **Local SQLite cache** with fast full-text search across all your nodes
 - **Daily full-account backups** stored locally as JSON snapshots
@@ -46,6 +46,8 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 
 | Tool | Description |
 |------|-------------|
+| `list_accounts` | List configured accounts plus sanitized configuration-source, persistence, and reload diagnostics |
+| `reload_configuration` | Reload accounts and API environment from disk without restarting the MCP client |
 | `list_bookmarks` | List all saved bookmarks and the user's custom AI instructions. **Call this at the start of every conversation.** |
 | `save_bookmark` | Save a node ID with a friendly name and context notes for future sessions |
 | `delete_bookmark` | Delete a saved bookmark by name |
@@ -66,7 +68,8 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 The server uses Workflowy's LLM Doc API for reads and writes, with a local SQLite cache for search:
 
 - **LLM Doc API**: `read_doc` and `edit_doc` call Workflowy's `/api/llm/doc/read/` and `/api/llm/doc/edit` endpoints directly for real-time access
-- **Public API environments**: cache sync, backups, validation, and mirror tools can use production (default) or beta; select the environment under **Accounts** and restart your MCP client after saving
+- **Public API environments**: cache sync, backups, validation, and mirror tools can use production (default) or beta; select the environment under **Accounts** and refresh MCP tools after saving
+- **Account hot reload**: the server detects saved account changes before tool calls, reloads them safely, and notifies compatible MCP clients that tool schemas changed
 - **Mirrors**: beta exposes synchronized mirror relationships through `data.mirror.origin_id` and `data.mirror.mirror_ids`; mirrors are views of one canonical origin, not copied subtrees
 - **Calendar targets**: Use `today`, `tomorrow`, `next_week`, or `inbox` as node IDs — the API handles date resolution automatically
 - **Batch operations**: `edit_doc` can perform multiple insert/update/delete operations in a single API call
@@ -84,7 +87,7 @@ The Tauri-based desktop app provides a UI for configuration and monitoring:
 - **Tools** — customize server instructions and individual tool descriptions to tune AI behavior
 - **Setup** — copy-paste configuration snippets for Claude Code, Claude Desktop, and Cursor
 - **Bookmarks** — view, edit context, and delete saved bookmarks
-- **Cache** — view cache status and trigger a manual sync
+- **Cache** — view the persistent cache status; sync it through the MCP `sync_nodes` tool
 - **Logs** — view MCP server logs in real time (auto-refreshes every 3 seconds)
 
 ## AI Section
@@ -132,7 +135,7 @@ All data is stored locally in the app data directory:
 
 Files stored: `config.json` (settings), `bookmarks.db` (SQLite database with bookmarks and node cache), `mcp-logs.json` (server logs), `backups/` (daily full-account export snapshots plus metadata). Bookmarks remain available in both environments; switching environments clears and refreshes only cached nodes. Beta backup snapshots are isolated in `beta/backups/` so they cannot replace production backups.
 
-The API key can also be set via the `WORKFLOWY_API_KEY` environment variable instead of the app config. Set `WORKFLOWY_API_ENVIRONMENT=beta` to override the saved public API environment for a server process.
+The API key can also be set via the `WORKFLOWY_API_KEY` environment variable when the app config has no structured `accounts` array. Structured accounts saved by the desktop app take precedence; `list_accounts` reports a sanitized warning when both sources are present. Set `WORKFLOWY_API_ENVIRONMENT=beta` to override the saved public API environment for a server process.
 
 ## Works With
 
