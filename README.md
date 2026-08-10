@@ -54,7 +54,7 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 | `save_bookmark` | Save a node ID with a friendly name and context notes for future sessions |
 | `delete_bookmark` | Delete a saved bookmark by name |
 | `read_doc` | Read a node and its children via the LLM Doc API. Supports calendar targets (`today`, `tomorrow`, `next_week`, `inbox`) and configurable depth (1-10). Returns tag-as-key JSON format. |
-| `edit_doc` | Edit nodes via the LLM Doc API. Supports `insert`, `update`, and `delete` operations in a single call. Can create nested structures with one request. |
+| `edit_doc` | Insert, update, complete, delete, and move nodes. Ordinary single-node edits use public API v1; grouped edits, nested structures, tables, and insert-after placement use the LLM Doc API automatically. |
 | `mirror_info` | Inspect whether a node is a mirror, an origin with mirrors, or a regular node (beta public API) |
 | `create_mirror` | Create a synchronized mirror under another parent (beta public API) |
 | `remove_mirror` | Remove one confirmed mirror root while preserving its origin (beta public API) |
@@ -67,13 +67,14 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 
 ## How It Works
 
-The server uses Workflowy's LLM Doc API for reads and writes, with a local SQLite cache for search:
+The server combines Workflowy's public API v1 with the LLM Doc API, plus a local SQLite cache for search:
 
-- **LLM Doc API**: `read_doc` and `edit_doc` call Workflowy's `/api/llm/doc/read/` and `/api/llm/doc/edit` endpoints directly for real-time access
-- **Public API environments**: cache sync, backups, validation, and mirror tools can use production (default) or beta; select the environment under **Accounts** and refresh MCP tools after saving
+- **Hybrid edit routing**: one flat insert, update, completion, deletion, or move uses public API v1; grouped operations, nested children, tables, paragraph nodes, completed inserts, mixed completion/content updates, and insert-after placement stay on `/api/llm/doc/edit`
+- **LLM Doc API**: `read_doc` calls `/api/llm/doc/read/` for recursive tag-as-key reads, and advanced `edit_doc` requests retain the document endpoint's richer structure support
+- **Public API environments**: ordinary edits, cache sync, backups, validation, and mirror tools can use production (default) or beta; select the environment under **Accounts** and refresh MCP tools after saving
 - **Account hot reload**: the server detects saved account changes before tool calls, reloads them safely, and notifies compatible MCP clients that tool schemas changed
 - **Mirrors**: beta exposes synchronized mirror relationships through `data.mirror.origin_id` and `data.mirror.mirror_ids`; mirrors are views of one canonical origin, not copied subtrees
-- **Calendar targets**: Use `today`, `tomorrow`, `next_week`, or `inbox` as node IDs — the API handles date resolution automatically
+- **Calendar targets**: Use `today`, `tomorrow`, `next_week`, or `inbox` as node IDs — public v1 creates missing Calendar destinations on demand for ordinary inserts and moves
 - **Batch operations**: `edit_doc` can perform multiple insert/update/delete operations in a single API call
 - **Local cache for search**: `search_nodes` uses a SQLite cache that auto-syncs when stale (>1 hour)
 - **Daily backups**: a complete `nodes-export` snapshot is saved once per day while the server is running

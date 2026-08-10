@@ -273,6 +273,9 @@ Edit cells with update (ref = cell tag). Add rows with one insert per column (us
 - If the API returns \`read_required\`, call read_doc for that root and retry
 - Insert can target a known parent tag or a system target such as "today" or "inbox"
 - Insert with "after" places items after a specific sibling (no position needed)
+- The server automatically uses public API v1 for one flat insert, update, completion, deletion, or move. Calendar destinations such as "today" are materialized on demand.
+- Grouped operations, nested children, tables, paragraph nodes, completed inserts, mixed completion/content updates, and insert-after placement continue to use the LLM document API.
+- The response reports the selected \`backend\` as \`public_v1\` or \`llm_doc\`.
 
 **Examples:**
 

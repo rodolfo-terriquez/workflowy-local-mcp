@@ -28,6 +28,11 @@ import {
   resolveApiEnvironment,
   type WorkflowyApiEnvironment,
 } from "../shared/api-environment.js";
+import {
+  planDocEdit,
+  type LlmDocOperation,
+  type PublicApiEditPlan,
+} from "../shared/edit-routing.js";
 
 // Config interface
 interface Config {
@@ -42,7 +47,7 @@ interface Config {
 }
 
 const DEFAULT_BACKUP_RETENTION_DAYS = 3;
-const SERVER_VERSION = "1.5.4";
+const SERVER_VERSION = "1.5.5";
 
 interface Account extends StoredAccountConfig {
   dataDir: string;
@@ -1251,6 +1256,7 @@ async function syncSingleNode(
         id: string;
         name?: string;
         note?: string;
+        parent_id?: string | null;
         priority?: number;
         completedAt?: number | null;
         createdAt?: number;
@@ -1269,8 +1275,11 @@ async function syncSingleNode(
       [node.id],
     );
     const cachedParentId = existingResult[0]?.values[0]?.[0] as string | null;
-    const parentId =
-      parentIdOverride !== undefined ? parentIdOverride : cachedParentId;
+    const parentId = parentIdOverride !== undefined
+      ? parentIdOverride
+      : node.parent_id !== undefined
+        ? node.parent_id
+        : cachedParentId;
     const childrenCount = (existingResult[0]?.values[0]?.[1] as number) ?? 0;
 
     db.run(
@@ -1829,6 +1838,7 @@ async function refreshCacheAfterEdit(
 
     if (operation.op === "move") {
       const newParentId = normalizeNodeApiParentId(operation.under);
+      addParentTarget(cachedParentId);
       addParentTarget(newParentId);
       nodeSyncRequests.set(operation.ref, newParentId);
     }
@@ -1939,6 +1949,58 @@ async function publicApiJsonRequest(
   return { http_status: response.status, ok: response.ok, data };
 }
 
+async function executePublicDocEdit(
+  apiKey: string,
+  plan: PublicApiEditPlan,
+): Promise<{
+  success: boolean;
+  createdNodeId?: string;
+  content: Array<{ type: "text"; text: string }>;
+}> {
+  const result = await publicApiJsonRequest(
+    apiKey,
+    plan.path,
+    plan.method,
+    plan.body,
+  );
+  const responseData = result.data && typeof result.data === "object"
+    ? result.data as Record<string, unknown>
+    : null;
+  const createdNodeId = typeof responseData?.item_id === "string"
+    ? responseData.item_id
+    : undefined;
+
+  if (!result.ok) {
+    return {
+      success: false,
+      content: toolJson({
+        error: true,
+        backend: plan.backend,
+        operation: plan.operation,
+        http_status: result.http_status,
+        message: result.data,
+        request: {
+          path: plan.path,
+          method: plan.method,
+          body: plan.body,
+        },
+      }).content,
+    };
+  }
+
+  return {
+    success: true,
+    createdNodeId,
+    content: toolJson({
+      success: true,
+      backend: plan.backend,
+      operation: plan.operation,
+      ...(createdNodeId ? { created_node_id: createdNodeId } : {}),
+      response: result.data,
+    }).content,
+  };
+}
+
 function toolJson(data: unknown): {
   content: Array<{ type: "text"; text: string }>;
 } {
@@ -2023,26 +2085,6 @@ async function llmDocRead(
   };
 }
 
-// LLM Doc API: Edit nodes (insert, update, delete operations)
-interface LlmDocOperation {
-  op: "insert" | "update" | "delete" | "move";
-  under?: string; // For insert/move: parent tag or target (today, inbox, etc.)
-  after?: string; // For insert: sibling tag to insert after
-  items?: Array<{
-    n: string; // Name/text
-    l?: string; // Line type (todo, h1, h2, h3, p, bullets, code, quote, table)
-    x?: number; // Completion status (1 = complete, 0 = incomplete)
-    c?: unknown[]; // Children for nested structures
-  }>;
-  position?: "top" | "bottom"; // For insert/move
-  ref?: string; // For update/delete/move: tag of node to modify or move
-  to?: {
-    n?: string; // New name
-    l?: string; // New line type
-    x?: number; // New completion status
-  };
-}
-
 async function llmDocEdit(
   apiKey: string,
   root: string,
@@ -2082,7 +2124,13 @@ async function llmDocEdit(
         {
           type: "text" as const,
           text: JSON.stringify(
-            { error: true, http_status: res.status, message: data, request: body },
+            {
+              error: true,
+              backend: "llm_doc",
+              http_status: res.status,
+              message: data,
+              request: body,
+            },
             null,
             2,
           ),
@@ -2096,7 +2144,11 @@ async function llmDocEdit(
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify({ success: true, response: data }, null, 2),
+        text: JSON.stringify(
+          { success: true, backend: "llm_doc", response: data },
+          null,
+          2,
+        ),
       },
     ],
   };
@@ -2245,6 +2297,7 @@ const defaultTools = [
                   type: "object",
                   properties: {
                     n: { type: "string", description: "Name/text content" },
+                    d: { type: "string", description: "Note/description text" },
                     l: {
                       type: "string",
                       enum: ["todo", "h1", "h2", "h3", "p", "bullets", "code", "quote", "table"],
@@ -2277,6 +2330,7 @@ const defaultTools = [
                 description: "For update: new values",
                 properties: {
                   n: { type: "string", description: "New name" },
+                  d: { type: "string", description: "New note/description" },
                   l: {
                     type: "string",
                     enum: ["todo", "h1", "h2", "h3", "p", "bullets", "code", "quote", "table"],
@@ -2482,7 +2536,7 @@ function getServerInstructions(db: Database | null): string {
     instructions +=
       "\n\n## Account Configuration Required\nNo valid Workflowy accounts are loaded. Call `list_accounts`, follow the sanitized `configuration.issues` resolutions, then call `reload_configuration`.";
   }
-  instructions += `\n\n## Public API Environment\nThe public Workflowy API is currently set to **${apiEnvironment}** (${getPublicApiBaseUrl(apiEnvironment)}). This setting controls cache sync, backups, validation, and mirror tools. The separate LLM Doc API used by read_doc and edit_doc is unchanged.`;
+  instructions += `\n\n## API Routing\nThe public Workflowy API is currently set to **${apiEnvironment}** (${getPublicApiBaseUrl(apiEnvironment)}). It handles cache sync, backups, validation, mirror tools, and ordinary single-node edit_doc operations. read_doc and advanced edit_doc operations (grouped edits, nested structures, tables, and insert-after placement) continue to use the beta LLM Doc API.`;
   
   // Try to append user's custom AI instructions from Workflowy
   if (db) {
@@ -2855,11 +2909,20 @@ async function main() {
           };
         }
 
-        writeMcpLog(`[edit_doc] Account "${acct.name}", editing root: ${root}, operations: ${JSON.stringify(operations)}`, "info");
+        const plan = planDocEdit(operations);
+        writeMcpLog(`[edit_doc] Account "${acct.name}", backend: ${plan.backend}, editing root: ${root}, operations: ${JSON.stringify(operations)}`, "info");
 
-        const result = await llmDocEdit(acct.apiKey, root, operations);
+        const result = plan.backend === "public_v1"
+          ? await executePublicDocEdit(acct.apiKey, plan)
+          : await llmDocEdit(acct.apiKey, root, operations);
         if (result.success) {
           await refreshCacheAfterEdit(acct, db, root, operations).catch(() => {});
+          const createdNodeId = "createdNodeId" in result
+            ? result.createdNodeId
+            : undefined;
+          if (createdNodeId) {
+            await syncSingleNode(acct, createdNodeId).catch(() => {});
+          }
         }
 
         return { content: result.content };
