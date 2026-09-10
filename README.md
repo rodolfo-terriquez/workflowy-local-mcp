@@ -36,6 +36,7 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 3. **Linux users**: make the AppImage executable (`chmod +x Workflowy.MCP_*_amd64.AppImage`) and run it directly
 
 4. **Windows users**: the `.msi` is the standard Windows installer; the `.exe` is an alternative setup package for the same x64 build
+   - Closing the app window keeps Workflowy MCP running in the system tray. Left-click the tray icon to reopen it, or use **Quit** in the tray menu to exit completely.
 
 5. Open the app and enter your Workflowy API key
    - Get one at [workflowy.com/api-reference](https://beta.workflowy.com/api-reference/)

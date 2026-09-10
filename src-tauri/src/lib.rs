@@ -325,6 +325,54 @@ fn clear_mcp_logs(app_handle: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(desktop)]
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[cfg(desktop)]
+fn setup_windows_tray(app: &mut tauri::App) -> tauri::Result<()> {
+    use tauri::{
+        menu::{Menu, MenuItem},
+        tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    };
+
+    let open_item = MenuItem::with_id(app, "tray-open", "Open Workflowy MCP", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "tray-quit", "Quit", true, None::<&str>)?;
+    let tray_menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+
+    let mut tray = TrayIconBuilder::with_id("workflowy-mcp-tray")
+        .tooltip("Workflowy MCP")
+        .menu(&tray_menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray-open" => show_main_window(app),
+            "tray-quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+
+    tray.build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -333,6 +381,14 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_process::init())
+        .on_window_event(|window, event| {
+            if cfg!(target_os = "windows") && window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             validate_api_key,
             get_server_path,
@@ -425,6 +481,10 @@ pub fn run() {
 
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
+
+                if cfg!(target_os = "windows") {
+                    setup_windows_tray(app)?;
+                }
             }
 
             Ok(())
