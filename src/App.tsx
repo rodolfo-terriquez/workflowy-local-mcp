@@ -1907,8 +1907,8 @@ function App() {
                   </select>
                   <p className="field-hint">
                     {apiEnvironment === "beta"
-                      ? "Beta enables early public API features such as mirror tools. Your mileage may vary. Save, then restart your MCP client."
-                      : "Production is the stable default. Mirror tools currently require beta."}
+                      ? "Beta adds richer mirror identity inspection and other early public API features. Save, then restart your MCP client."
+                      : "Production is the stable default and supports mirror creation/removal; mirror_info requires beta."}
                   </p>
                 </div>
               </div>

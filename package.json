@@ -1,17 +1,19 @@
 {
   "name": "workflowy-local-mcp",
   "private": true,
-  "version": "1.5.6",
+  "version": "1.5.7",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "build:mcp": "esbuild mcp-server/server.ts --bundle --platform=node --target=node18 --outfile=dist-mcp/server.cjs --format=cjs",
-    "test": "npm run test:accounts && npm run test:api-environment && npm run test:edit-routing && npm run test:mcp-hot-reload",
+    "test": "npm run test:accounts && npm run test:api-environment && npm run test:mirror-metadata && npm run test:edit-routing && npm run test:mcp-hot-reload && npm run test:mirror-tools",
     "test:accounts": "node -e \"require('node:fs').mkdirSync('.tmp', { recursive: true })\" && esbuild tests/accounts.test.ts --bundle --platform=node --target=node20 --outfile=.tmp/accounts.test.cjs --format=cjs && node --test .tmp/accounts.test.cjs",
     "test:api-environment": "node -e \"require('node:fs').mkdirSync('.tmp', { recursive: true })\" && esbuild tests/api-environment.test.ts --bundle --platform=node --target=node20 --outfile=.tmp/api-environment.test.cjs --format=cjs && node --test .tmp/api-environment.test.cjs",
+    "test:mirror-metadata": "node -e \"require('node:fs').mkdirSync('.tmp', { recursive: true })\" && esbuild tests/mirror-metadata.test.ts --bundle --platform=node --target=node20 --outfile=.tmp/mirror-metadata.test.cjs --format=cjs && node --test .tmp/mirror-metadata.test.cjs",
     "test:edit-routing": "node -e \"require('node:fs').mkdirSync('.tmp', { recursive: true })\" && esbuild tests/edit-routing.test.ts --bundle --platform=node --target=node20 --outfile=.tmp/edit-routing.test.cjs --format=cjs && node --test .tmp/edit-routing.test.cjs",
     "test:mcp-hot-reload": "npm run build:mcp && node --test tests/mcp-hot-reload.test.mjs",
+    "test:mirror-tools": "npm run build:mcp && node --test tests/mirror-tools.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "mcp-server": "node dist-mcp/server.cjs"

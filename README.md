@@ -11,7 +11,7 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 ## Features
 
 - **16 tools** for managing Workflowy nodes, mirrors, accounts, cache, and backups
-- **Production or beta public API** — production remains the default; beta unlocks early features such as mirror tools
+- **Production or beta public API** — production handles mirror writes; beta adds richer mirror identity metadata
 - **Local SQLite cache** with fast full-text search across all your nodes
 - **Daily full-account backups** stored locally as JSON snapshots
 - **Configurable backup retention** — optionally keep only the newest N backups
@@ -39,7 +39,7 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
    - Closing the app window keeps Workflowy MCP running in the system tray. Left-click the tray icon to reopen it, or use **Quit** in the tray menu to exit completely.
 
 5. Open the app and enter your Workflowy API key
-   - Get one at [workflowy.com/api-reference](https://beta.workflowy.com/api-reference/)
+   - Get one at [workflowy.com/api-reference](https://workflowy.com/api-reference/)
 
 6. Go to the **Setup** tab and follow the instructions for your MCP client (Claude Code, Claude Desktop, Cursor, or any app that supports MCP)
 
@@ -57,9 +57,9 @@ Workflowy's API has no search endpoint and a strict 1 request/minute rate limit 
 | `read_doc` | Read a node and its children via the LLM Doc API. Supports calendar targets (`today`, `tomorrow`, `next_week`, `inbox`) and configurable depth (1-10). Returns tag-as-key JSON format. |
 | `edit_doc` | Insert, update, complete, delete, and move nodes. Ordinary single-node edits use public API v1; grouped edits, nested structures, tables, and insert-after placement use the LLM Doc API automatically. |
 | `mirror_info` | Inspect whether a node is a mirror, an origin with mirrors, or a regular node (beta public API) |
-| `create_mirror` | Create a synchronized mirror under another parent (beta public API) |
-| `remove_mirror` | Remove one confirmed mirror root while preserving its origin (beta public API) |
-| `search_nodes` | Search locally cached nodes by text. Returns results with breadcrumb paths and a preview of each result's children. |
+| `create_mirror` | Create a synchronized mirror under another parent (production or beta public API) |
+| `remove_mirror` | Remove one confirmed mirror root while preserving its origin (production or beta public API) |
+| `search_nodes` | Search locally cached nodes by text. Returns breadcrumb paths, child previews, timestamps, and mirror/origin metadata when present. |
 | `sync_nodes` | Full sync of all Workflowy nodes to local cache (rate limited to 1 request per minute) |
 | `list_backups` | List stored full-account backup snapshots with IDs, timestamps, sizes, and file paths |
 | `create_backup` | Create a fresh full-account backup snapshot on demand |
@@ -72,9 +72,9 @@ The server combines Workflowy's public API v1 with the LLM Doc API, plus a local
 
 - **Hybrid edit routing**: one flat insert, update, completion, deletion, or move uses public API v1; grouped operations, nested children, tables, paragraph nodes, completed inserts, mixed completion/content updates, and insert-after placement stay on `/api/llm/doc/edit`
 - **LLM Doc API**: `read_doc` calls `/api/llm/doc/read/` for recursive tag-as-key reads, and advanced `edit_doc` requests retain the document endpoint's richer structure support
-- **Public API environments**: ordinary edits, cache sync, backups, validation, and mirror tools can use production (default) or beta; select the environment under **Accounts** and refresh MCP tools after saving
+- **Public API environments**: ordinary edits, cache sync, backups, validation, and mirror create/remove can use production (default) or beta; richer mirror inspection requires beta; select the environment under **Accounts** and refresh MCP tools after saving
 - **Account hot reload**: the server detects saved account changes before tool calls, reloads them safely, and notifies compatible MCP clients that tool schemas changed
-- **Mirrors**: beta exposes synchronized mirror relationships through `data.mirror.origin_id` and `data.mirror.mirror_ids`; mirrors are views of one canonical origin, not copied subtrees
+- **Mirrors**: production supports create/remove, while beta adds richer `data.mirror.origin_id`, `data.mirror.mirror_ids`, and list-level identity metadata; cache sync and search preserve these relationships, including inaccessible origins reported as `origin_id: null`
 - **Calendar targets**: Use `today`, `tomorrow`, `next_week`, or `inbox` as node IDs — public v1 creates missing Calendar destinations on demand for ordinary inserts and moves
 - **Batch operations**: `edit_doc` can perform multiple insert/update/delete operations in a single API call
 - **Local cache for search**: `search_nodes` uses a SQLite cache that auto-syncs when stale (>1 hour)

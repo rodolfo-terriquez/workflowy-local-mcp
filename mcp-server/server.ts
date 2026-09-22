@@ -33,6 +33,13 @@ import {
   type LlmDocOperation,
   type PublicApiEditPlan,
 } from "../shared/edit-routing.js";
+import {
+  describeListMirrorRelationship,
+  describeNodeMirrorRelationship,
+  getCachedMirrorRelationship,
+  getMirrorCacheFields,
+  type MirrorRelationship,
+} from "../shared/mirror-metadata.js";
 
 // Config interface
 interface Config {
@@ -47,7 +54,7 @@ interface Config {
 }
 
 const DEFAULT_BACKUP_RETENTION_DAYS = 3;
-const SERVER_VERSION = "1.5.5";
+const SERVER_VERSION = "1.5.7";
 
 interface Account extends StoredAccountConfig {
   dataDir: string;
@@ -64,10 +71,20 @@ interface WorkflowyExportNode {
   priority?: number;
   createdAt?: number;
   modifiedAt?: number;
+  data?: {
+    mirror?: {
+      origin_id?: string | null;
+      mirror_ids?: string[];
+    };
+  };
 }
 
 interface WorkflowyExportResponse {
   nodes: WorkflowyExportNode[];
+  mirror?: {
+    origin_id?: string | null;
+    mirror_ids?: string[];
+  };
 }
 
 interface BackupSnapshotMetadata {
@@ -385,7 +402,10 @@ async function getDbForAccount(account: Account): Promise<Database> {
       priority INTEGER DEFAULT 0,
       created_at TEXT,
       updated_at TEXT,
-      completed_at TEXT
+      completed_at TEXT,
+      mirror_role TEXT,
+      mirror_origin_id TEXT,
+      mirror_ids TEXT
     )
   `);
 
@@ -407,6 +427,15 @@ async function getDbForAccount(account: Account): Promise<Database> {
     }
     if (!columns.includes("completed_at")) {
       db.run("ALTER TABLE nodes ADD COLUMN completed_at TEXT");
+    }
+    if (!columns.includes("mirror_role")) {
+      db.run("ALTER TABLE nodes ADD COLUMN mirror_role TEXT");
+    }
+    if (!columns.includes("mirror_origin_id")) {
+      db.run("ALTER TABLE nodes ADD COLUMN mirror_origin_id TEXT");
+    }
+    if (!columns.includes("mirror_ids")) {
+      db.run("ALTER TABLE nodes ADD COLUMN mirror_ids TEXT");
     }
   }
 
@@ -810,12 +839,32 @@ function replaceNodesCache(
       }
     }
 
+    const existingMirrorById = new Map<string, {
+      mirror_role: "mirror" | "origin" | null;
+      mirror_origin_id: string | null;
+      mirror_ids: string | null;
+    }>();
+    const existingMirrorRows = db.exec(
+      "SELECT id, mirror_role, mirror_origin_id, mirror_ids FROM nodes WHERE mirror_role IS NOT NULL",
+    );
+    for (const row of existingMirrorRows[0]?.values ?? []) {
+      existingMirrorById.set(row[0] as string, {
+        mirror_role: row[1] as "mirror" | "origin",
+        mirror_origin_id: (row[2] as string) || null,
+        mirror_ids: (row[3] as string) || null,
+      });
+    }
+
     db.run("DELETE FROM nodes");
 
     for (const node of nodes) {
       const childrenCount = childrenCountMap.get(node.id) || 0;
+      const apiMirror = getMirrorCacheFields(node);
+      const mirror = apiMirror.mirror_role
+        ? apiMirror
+        : existingMirrorById.get(node.id) ?? apiMirror;
       db.run(
-        "INSERT INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at, completed_at, mirror_role, mirror_origin_id, mirror_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           node.id,
           node.name || "",
@@ -831,6 +880,9 @@ function replaceNodesCache(
           node.completedAt
             ? new Date(node.completedAt * 1000).toISOString()
             : null,
+          mirror.mirror_role,
+          mirror.mirror_origin_id,
+          mirror.mirror_ids,
         ],
       );
     }
@@ -1252,16 +1304,7 @@ async function syncSingleNode(
     }
 
     const responseData = (await res.json()) as {
-      node: {
-        id: string;
-        name?: string;
-        note?: string;
-        parent_id?: string | null;
-        priority?: number;
-        completedAt?: number | null;
-        createdAt?: number;
-        modifiedAt?: number;
-      };
+      node: WorkflowyExportNode;
     };
 
     const node = responseData.node;
@@ -1271,7 +1314,7 @@ async function syncSingleNode(
 
     // Update or insert the node (preserve parent_id and children_count from cache)
     const existingResult = db.exec(
-      "SELECT parent_id, children_count FROM nodes WHERE id = ?",
+      "SELECT parent_id, children_count, mirror_role, mirror_origin_id, mirror_ids FROM nodes WHERE id = ?",
       [node.id],
     );
     const cachedParentId = existingResult[0]?.values[0]?.[0] as string | null;
@@ -1280,11 +1323,20 @@ async function syncSingleNode(
       : node.parent_id !== undefined
         ? node.parent_id
         : cachedParentId;
-    const childrenCount = (existingResult[0]?.values[0]?.[1] as number) ?? 0;
+    const existingRow = existingResult[0]?.values[0];
+    const childrenCount = (existingRow?.[1] as number) ?? 0;
+    const apiMirror = getMirrorCacheFields(node);
+    const mirror = apiMirror.mirror_role
+      ? apiMirror
+      : {
+          mirror_role: (existingRow?.[2] as "mirror" | "origin" | null) ?? null,
+          mirror_origin_id: (existingRow?.[3] as string | null) ?? null,
+          mirror_ids: (existingRow?.[4] as string | null) ?? null,
+        };
 
     db.run(
-      `INSERT OR REPLACE INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at, completed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at, completed_at, mirror_role, mirror_origin_id, mirror_ids)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         node.id,
         node.name || "",
@@ -1296,6 +1348,9 @@ async function syncSingleNode(
         node.createdAt ? new Date(node.createdAt * 1000).toISOString() : null,
         node.modifiedAt ? new Date(node.modifiedAt * 1000).toISOString() : null,
         node.completedAt ? new Date(node.completedAt * 1000).toISOString() : null,
+        mirror.mirror_role,
+        mirror.mirror_origin_id,
+        mirror.mirror_ids,
       ],
     );
     saveDbForAccount(account);
@@ -1336,17 +1391,7 @@ async function syncNodeChildren(
       throw new Error(`API error: ${res.status} ${res.statusText}`);
     }
 
-    const responseData = (await res.json()) as {
-      nodes: Array<{
-        id: string;
-        name?: string;
-        note?: string;
-        priority?: number;
-        completedAt?: number | null;
-        createdAt?: number;
-        modifiedAt?: number;
-      }>;
-    };
+    const responseData = (await res.json()) as WorkflowyExportResponse;
 
     const nodes = responseData.nodes || [];
     
@@ -1375,14 +1420,23 @@ async function syncNodeChildren(
 
       // Get existing children_count from cache (we don't want to reset it)
       const childCountResult = db.exec(
-        "SELECT children_count FROM nodes WHERE id = ?",
+        "SELECT children_count, mirror_role, mirror_origin_id, mirror_ids FROM nodes WHERE id = ?",
         [node.id],
       );
-      const childrenCount = (childCountResult[0]?.values[0]?.[0] as number) ?? 0;
+      const existingRow = childCountResult[0]?.values[0];
+      const childrenCount = (existingRow?.[0] as number) ?? 0;
+      const apiMirror = getMirrorCacheFields(node);
+      const mirror = apiMirror.mirror_role
+        ? apiMirror
+        : {
+            mirror_role: (existingRow?.[1] as "mirror" | "origin" | null) ?? null,
+            mirror_origin_id: (existingRow?.[2] as string | null) ?? null,
+            mirror_ids: (existingRow?.[3] as string | null) ?? null,
+          };
 
       db.run(
-        `INSERT OR REPLACE INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO nodes (id, name, note, parent_id, completed, children_count, priority, created_at, updated_at, completed_at, mirror_role, mirror_origin_id, mirror_ids)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           node.id,
           node.name || "",
@@ -1394,7 +1448,19 @@ async function syncNodeChildren(
           node.createdAt ? new Date(node.createdAt * 1000).toISOString() : null,
           node.modifiedAt ? new Date(node.modifiedAt * 1000).toISOString() : null,
           node.completedAt ? new Date(node.completedAt * 1000).toISOString() : null,
+          mirror.mirror_role,
+          mirror.mirror_origin_id,
+          mirror.mirror_ids,
         ],
+      );
+    }
+
+    const listMirror = describeListMirrorRelationship(responseData);
+    if (parentId && listMirror) {
+      const mirror = getMirrorCacheFields({ data: { mirror: responseData.mirror } });
+      db.run(
+        "UPDATE nodes SET mirror_role = ?, mirror_origin_id = ?, mirror_ids = ? WHERE id = ?",
+        [mirror.mirror_role, mirror.mirror_origin_id, mirror.mirror_ids, parentId],
       );
     }
 
@@ -1450,6 +1516,7 @@ interface NodeTree {
   parent_id: string | null;
   completed: boolean;
   children_count: number;
+  mirror?: MirrorRelationship;
   children?: NodeTree[];
 }
 
@@ -1470,7 +1537,7 @@ function buildNodeTree(
   const params = nodeId === null ? [] : [nodeId];
 
   const results = db.exec(
-    `SELECT id, name, note, parent_id, completed, children_count FROM nodes WHERE ${parentCondition} ORDER BY priority, name`,
+    `SELECT id, name, note, parent_id, completed, children_count, mirror_role, mirror_origin_id, mirror_ids FROM nodes WHERE ${parentCondition} ORDER BY priority, name`,
     params,
   );
 
@@ -1485,6 +1552,7 @@ function buildNodeTree(
       return !excludeNodeNames.includes(name);
     })
     .map((row) => {
+      const mirror = getCachedMirrorRelationship(row[6], row[7], row[8]);
       const node: NodeTree = {
         id: row[0] as string,
         name: row[1] as string,
@@ -1492,6 +1560,7 @@ function buildNodeTree(
         parent_id: (row[3] as string) || null,
         completed: row[4] === 1,
         children_count: (row[5] as number) || 0,
+        ...(mirror ? { mirror } : {}),
       };
 
       // Recursively get children if we haven't reached max depth
@@ -1686,7 +1755,7 @@ const FUZZY_SEARCH_THRESHOLD = 0.2;
 // Get a single node by ID from local cache
 function getNodeFromCache(db: Database, nodeId: string): NodeTree | null {
   const results = db.exec(
-    "SELECT id, name, note, parent_id, completed, children_count FROM nodes WHERE id = ?",
+    "SELECT id, name, note, parent_id, completed, children_count, mirror_role, mirror_origin_id, mirror_ids FROM nodes WHERE id = ?",
     [nodeId],
   );
 
@@ -1695,6 +1764,7 @@ function getNodeFromCache(db: Database, nodeId: string): NodeTree | null {
   }
 
   const row = results[0].values[0];
+  const mirror = getCachedMirrorRelationship(row[6], row[7], row[8]);
   return {
     id: row[0] as string,
     name: row[1] as string,
@@ -1702,6 +1772,7 @@ function getNodeFromCache(db: Database, nodeId: string): NodeTree | null {
     parent_id: (row[3] as string) || null,
     completed: row[4] === 1,
     children_count: (row[5] as number) || 0,
+    ...(mirror ? { mirror } : {}),
   };
 }
 
@@ -1910,12 +1981,12 @@ async function validateWorkflowyToken(apiKey: string): Promise<void> {
   }
 }
 
-function requireBetaMirrorApi(): void {
+function requireBetaMirrorMetadataApi(): void {
   if (apiEnvironment === "beta") {
     return;
   }
   throw new Error(
-    "Workflowy mirror tools currently require the beta public API. In the Local MCP app, open Settings > Accounts, select Beta, save, and restart your MCP client. You can also set WORKFLOWY_API_ENVIRONMENT=beta before starting the server.",
+    "Workflowy mirror identity inspection currently requires the beta public API. Mirror creation and removal are available in production. In the Local MCP app, open Settings > Accounts, select Beta, save, and restart your MCP client to use mirror_info.",
   );
 }
 
@@ -2006,29 +2077,6 @@ function toolJson(data: unknown): {
 } {
   return {
     content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-  };
-}
-
-function getMirrorRelationship(node: unknown): {
-  role: "mirror" | "origin" | "regular";
-  origin_id: string | null;
-  mirror_ids: string[];
-} {
-  const record = node && typeof node === "object" ? node as Record<string, unknown> : {};
-  const data = record.data && typeof record.data === "object"
-    ? record.data as Record<string, unknown>
-    : {};
-  const mirror = data.mirror && typeof data.mirror === "object"
-    ? data.mirror as Record<string, unknown>
-    : {};
-  const originId = typeof mirror.origin_id === "string" ? mirror.origin_id : null;
-  const mirrorIds = Array.isArray(mirror.mirror_ids)
-    ? mirror.mirror_ids.filter((id): id is string => typeof id === "string")
-    : [];
-  return {
-    role: originId ? "mirror" : mirrorIds.length > 0 ? "origin" : "regular",
-    origin_id: originId,
-    mirror_ids: mirrorIds,
   };
 }
 
@@ -2347,7 +2395,7 @@ const defaultTools = [
       required: ["root", "operations"],
     },
   },
-  // Public API mirror tools (currently beta only)
+  // Public API mirror tools (writes are stable; richer identity inspection uses beta)
   {
     name: "mirror_info",
     description: toolDescriptions.mirror_info,
@@ -2536,7 +2584,7 @@ function getServerInstructions(db: Database | null): string {
     instructions +=
       "\n\n## Account Configuration Required\nNo valid Workflowy accounts are loaded. Call `list_accounts`, follow the sanitized `configuration.issues` resolutions, then call `reload_configuration`.";
   }
-  instructions += `\n\n## API Routing\nThe public Workflowy API is currently set to **${apiEnvironment}** (${getPublicApiBaseUrl(apiEnvironment)}). It handles cache sync, backups, validation, mirror tools, and ordinary single-node edit_doc operations. read_doc and advanced edit_doc operations (grouped edits, nested structures, tables, and insert-after placement) continue to use the beta LLM Doc API.`;
+  instructions += `\n\n## API Routing\nThe public Workflowy API is currently set to **${apiEnvironment}** (${getPublicApiBaseUrl(apiEnvironment)}). It handles cache sync, backups, validation, mirror creation/removal, and ordinary single-node edit_doc operations. Rich mirror_info identity data requires beta. read_doc and advanced edit_doc operations (grouped edits, nested structures, tables, and insert-after placement) continue to use the beta LLM Doc API.`;
   
   // Try to append user's custom AI instructions from Workflowy
   if (db) {
@@ -2929,7 +2977,7 @@ async function main() {
       }
 
       case "mirror_info": {
-        requireBetaMirrorApi();
+        requireBetaMirrorMetadataApi();
         const acct = await validateAccount(resolveAccount(args?.account as string | undefined));
         const nodeId = args?.node_id as string;
         if (!nodeId) {
@@ -2951,17 +2999,29 @@ async function main() {
           ? result.data as Record<string, unknown>
           : {};
         const node = responseRecord.node ?? result.data;
+        const listResult = await publicApiJsonRequest(
+          acct.apiKey,
+          `/nodes?parent_id=${encodeURIComponent(nodeId)}`,
+          "GET",
+        );
+        const listRelationship = listResult.ok
+          ? describeListMirrorRelationship(listResult.data)
+          : null;
         return toolJson({
           account: acct.name,
           api_environment: apiEnvironment,
           node,
-          mirror: getMirrorRelationship(node),
+          mirror: listRelationship ?? describeNodeMirrorRelationship(node),
+          identity_source: listRelationship ? "list_metadata" : "node_metadata",
+          ...(listResult.ok
+            ? {}
+            : { list_metadata_warning: `Unable to read list-level mirror metadata (HTTP ${listResult.http_status}).` }),
         });
       }
 
       case "create_mirror": {
-        requireBetaMirrorApi();
         const acct = await validateAccount(resolveAccount(args?.account as string | undefined));
+        const db = await getDbForAccount(acct);
         const nodeId = args?.node_id as string;
         const parentId = args?.parent_id as string;
         const position = (args?.position as string | undefined) ?? "top";
@@ -2969,7 +3029,7 @@ async function main() {
           throw new Error("Missing required parameters: node_id and parent_id");
         }
         if (position !== "top" && position !== "bottom") {
-          throw new Error('position must be either "top" or "bottom"');
+          throw new Error(`position must be either "top" or "bottom"`);
         }
         const result = await publicApiJsonRequest(
           acct.apiKey,
@@ -2977,10 +3037,42 @@ async function main() {
           "POST",
           { parent_id: parentId, position },
         );
+        const resultRecord = result.data && typeof result.data === "object"
+          ? result.data as Record<string, unknown>
+          : {};
+        const createdMirrorId = typeof resultRecord.item_id === "string"
+          ? resultRecord.item_id
+          : null;
+        let cacheRefreshed = false;
+        let cacheWarning: string | null = null;
+        if (result.ok) {
+          const parentRefresh = await syncNodeChildren(acct, parentId);
+          if (parentRefresh.success && createdMirrorId) {
+            const originId = typeof resultRecord.origin_id === "string"
+              ? resultRecord.origin_id
+              : null;
+            db.run(
+              "UPDATE nodes SET mirror_role = ?, mirror_origin_id = ?, mirror_ids = NULL WHERE id = ?",
+              ["mirror", originId, createdMirrorId],
+            );
+            saveDbForAccount(acct);
+          }
+          const mirrorRefresh = createdMirrorId
+            ? await syncNodeChildren(acct, createdMirrorId)
+            : { success: false, error: "Mirror response did not include item_id." };
+          cacheRefreshed = parentRefresh.success && mirrorRefresh.success;
+          if (!cacheRefreshed) {
+            cacheWarning = [parentRefresh.error, mirrorRefresh.error].filter(Boolean).join(" ") ||
+              "Mirror was created, but the local cache refresh was incomplete.";
+            markCacheStale(db, acct);
+          }
+        }
         return toolJson({
           account: acct.name,
           api_environment: apiEnvironment,
           ...result,
+          cache_refreshed: cacheRefreshed,
+          ...(cacheWarning ? { cache_warning: cacheWarning } : {}),
           ...(result.ok
             ? {
                 mirror: result.data,
@@ -2991,8 +3083,8 @@ async function main() {
       }
 
       case "remove_mirror": {
-        requireBetaMirrorApi();
         const acct = await validateAccount(resolveAccount(args?.account as string | undefined));
+        const db = await getDbForAccount(acct);
         const nodeId = args?.node_id as string;
         if (!nodeId) {
           throw new Error("Missing required parameter: node_id");
@@ -3014,24 +3106,51 @@ async function main() {
           ? info.data as Record<string, unknown>
           : {};
         const node = infoRecord.node ?? info.data;
-        const relationship = getMirrorRelationship(node);
-        if (relationship.role !== "mirror") {
+        const nodeRecord = node && typeof node === "object"
+          ? node as Record<string, unknown>
+          : {};
+        const relationship = describeNodeMirrorRelationship(node);
+        const identityVerified = relationship.role === "mirror";
+        if (!identityVerified && apiEnvironment === "beta") {
           throw new Error(
             `Refusing to remove node ${nodeId}: the beta API does not identify it as a mirror root. The origin was not changed.`,
           );
         }
+        const cachedParentId = getNodeParentIdFromCache(db, nodeId);
+        const parentId = typeof nodeRecord.parent_id === "string"
+          ? nodeRecord.parent_id
+          : cachedParentId;
         const result = await publicApiJsonRequest(
           acct.apiKey,
           `/nodes/${encodeURIComponent(nodeId)}/mirror`,
           "DELETE",
         );
+        let cacheRefreshed = false;
+        let cacheWarning: string | null = null;
+        if (result.ok) {
+          deleteNodeFromCache(db, nodeId);
+          saveDbForAccount(acct);
+          if (parentId) {
+            const parentRefresh = await syncNodeChildren(acct, parentId);
+            cacheRefreshed = parentRefresh.success;
+            cacheWarning = parentRefresh.success ? null : parentRefresh.error ?? null;
+          } else {
+            cacheWarning = "Mirror was removed, but its parent was unavailable for a targeted cache refresh.";
+          }
+          if (!cacheRefreshed) {
+            markCacheStale(db, acct);
+          }
+        }
         return toolJson({
           account: acct.name,
           api_environment: apiEnvironment,
           ...result,
           removed_mirror_id: result.ok ? nodeId : null,
           origin_id: relationship.origin_id,
+          identity_verified: identityVerified,
           origin_preserved: result.ok,
+          cache_refreshed: cacheRefreshed,
+          ...(cacheWarning ? { cache_warning: cacheWarning } : {}),
         });
       }
 
@@ -3097,7 +3216,7 @@ async function main() {
 
         const seenIds = new Set<string>();
         const mergedValues: (initSqlJs.SqlValue[])[] = [];
-        const columns = ["id", "name", "note", "parent_id", "completed", "children_count", "created_at", "updated_at", "completed_at"];
+        const columns = ["id", "name", "note", "parent_id", "completed", "children_count", "created_at", "updated_at", "completed_at", "mirror_role", "mirror_origin_id", "mirror_ids"];
 
         function addResults(queryResult: initSqlJs.QueryExecResult[]): void {
           if (queryResult.length > 0 && queryResult[0].values.length > 0) {
@@ -3114,7 +3233,7 @@ async function main() {
         // --- Pass 1: Exact phrase match (no LIMIT — these are the best matches) ---
         const phrasePattern = `%${query.toUpperCase()}%`;
         addResults(db.exec(
-          `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at
+          `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at, mirror_role, mirror_origin_id, mirror_ids
            FROM nodes
            WHERE (UPPER(name) LIKE ? OR UPPER(note) LIKE ?)
            ${completedFilter}`,
@@ -3135,7 +3254,7 @@ async function main() {
             fragmentParams.push(300);
 
             addResults(db.exec(
-              `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at
+              `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at, mirror_role, mirror_origin_id, mirror_ids
                FROM nodes
                WHERE (${fragmentClauses.join(" OR ")})
                ${completedFilter}
@@ -3157,7 +3276,7 @@ async function main() {
           andParams.push(200);
 
           addResults(db.exec(
-            `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at
+            `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at, mirror_role, mirror_origin_id, mirror_ids
              FROM nodes
              WHERE (${andClauses.join(" AND ")})
              ${completedFilter}
@@ -3176,7 +3295,7 @@ async function main() {
           orParams.push(200);
 
           addResults(db.exec(
-            `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at
+            `SELECT id, name, note, parent_id, completed, children_count, created_at, updated_at, completed_at, mirror_role, mirror_origin_id, mirror_ids
              FROM nodes
              WHERE (${orClauses.join(" OR ")})
              ${completedFilter}
@@ -3218,6 +3337,7 @@ async function main() {
           const nodeId = row[0] as string;
           const childrenCount = (row[5] as number) || 0;
           const nodePath = buildNodePath(db, nodeId);
+          const mirror = getCachedMirrorRelationship(row[9], row[10], row[11]);
 
           // Get first 5 children as preview (ordered by priority)
           let childrenPreview: Array<{
@@ -3254,6 +3374,7 @@ async function main() {
             created_at: row[6] || null,
             modified_at: row[7] || null,
             completed_at: row[8] || null,
+            ...(mirror ? { mirror } : {}),
           };
         });
 
